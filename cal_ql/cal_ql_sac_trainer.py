@@ -60,7 +60,7 @@ class Trainer(object):
 
             # Q forward
             q_new_actions = torch.min(self.qf["qf1"](observations, new_actions), self.qf["qf2"](observations, new_actions))
-            policy_loss = (alpha * log_pi - q_new_actions).mean()
+            policy_loss = (alpha.detach() * log_pi - q_new_actions).mean()
 
             q1_pred = self.qf["qf1"](observations, actions)
             q2_pred = self.qf["qf2"](observations, actions)
@@ -120,16 +120,16 @@ class Trainer(object):
                     cql_cat_q1 = torch.cat(
                         [
                             cql_q1_rand - random_density,
-                            cql_q1_next_actions - cql_next_log_pis.detach(),
-                            cql_q1_current_actions - cql_current_log_pis.detach(),
+                            cql_q1_next_actions - cql_next_log_pis,
+                            cql_q1_current_actions - cql_current_log_pis,
                         ],
                         dim=1,
                     )
                     cql_cat_q2 = torch.cat(
                         [
                             cql_q2_rand - random_density,
-                            cql_q2_next_actions - cql_next_log_pis.detach(),
-                            cql_q2_current_actions - cql_current_log_pis.detach(),
+                            cql_q2_next_actions - cql_next_log_pis,
+                            cql_q2_current_actions - cql_current_log_pis,
                         ],
                         dim=1,
                     )
