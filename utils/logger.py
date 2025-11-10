@@ -13,7 +13,7 @@ import wandb
 class WandBLogger(object):
 
     def __init__(self, config, variant):
-        self.config = self.get_default_config(config)
+        self.config = config
 
         if self.config.experiment_id is None:
             self.config.experiment_id = ""
