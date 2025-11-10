@@ -48,6 +48,17 @@ def collect_metrics(metrics, names, prefix=None):
     return collected
 
 
+def batch_to_torch(batch, device):
+    return {k: torch.from_numpy(v).to(device=device, non_blocking=True) for k, v in batch.items()}
+
+
+def prefix_metrics(metrics, prefix=None):
+    if prefix:
+        return {"{}/{}".format(prefix, key): value for key, value in metrics.items()}
+    else:
+        return metrics
+
+
 class Timer(object):
 
     def __init__(self):

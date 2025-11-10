@@ -2,3 +2,7 @@ gym
 numpy
 pybullet
 tqdm
+hydra-core
+omegaconf
+wandb
+python-dateutil

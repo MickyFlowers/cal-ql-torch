@@ -1,0 +1,46 @@
+defaults:
+  - cal_ql: cal_ql_defaults
+  - logging: logging_defaults
+
+# Core experiment settings
+env: antmaze-medium-diverse-v2
+seed: 42
+save_model: false
+batch_size: 256
+
+# Reward & action preprocessing
+reward_scale: 10.0
+reward_bias: -5.0
+clip_action: 0.99999
+
+# Architecture & policy hyperparameters
+policy_arch: '256-256'
+qf_arch: '256-256-256-256'
+orthogonal_init: true
+policy_log_std_multiplier: 1.0
+policy_log_std_offset: -1.0
+
+# Offline pretraining / online finetuning schedule
+n_train_step_per_epoch_offline: 1000
+n_pretrain_epochs: 1000
+offline_eval_every_n_epoch: 50
+max_online_env_steps: 1e6
+online_eval_every_n_env_steps: 5000
+
+# Evaluation & replay buffer
+eval_n_trajs: 20
+replay_buffer_size: 1000000
+mixing_ratio: 0.5  # -1 => adaptive mixing
+
+# CQL related toggles
+use_cql: true
+online_use_cql: true
+cql_min_q_weight: 5.0
+cql_min_q_weight_online: -1.0  # -1 => keep previous value
+enable_calql: true
+
+# Online phase collection & training dynamics
+n_online_traj_per_epoch: 1
+online_utd_ratio: 1
+device: 'cpu'
+torch_compile_mode: "default"

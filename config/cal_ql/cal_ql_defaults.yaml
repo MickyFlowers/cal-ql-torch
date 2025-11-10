@@ -1,0 +1,19 @@
+discount: 0.99
+alpha_multiplier: 1.0
+use_automatic_entropy_tuning: true
+backup_entropy: false
+target_entropy: 0.0
+policy_lr: 1e-4
+qf_lr: 3e-4
+optimizer_type: adam
+soft_target_update_rate: 5e-3
+cql_n_actions: 10
+cql_importance_sample: true
+cql_lagrange: true
+cql_target_action_gap: 0.8
+cql_temp: 1.0
+cql_max_target_backup: true
+cql_clip_diff_min: -.inf
+cql_clip_diff_max: .inf
+
+target_update_interval: 1
