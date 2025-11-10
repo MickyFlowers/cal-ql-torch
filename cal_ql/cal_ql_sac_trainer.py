@@ -46,22 +46,9 @@ class Trainer(object):
         rewards = batch["rewards"]
         next_observations = batch["next_observations"]
         dones = batch["dones"]
-        
-        # Policy forward
+        # critic update
         with autocast(device_type=observations.device.type, enabled=torch.is_autocast_enabled()):
-            new_actions, log_pi = self.policy(observations)
-
-            if self.config.use_automatic_entropy_tuning:
-                alpha_loss = -(self.log_alpha() * (log_pi + self.config.target_entropy).detach()).mean()
-                alpha = torch.exp(self.log_alpha()) * self.config.alpha_multiplier
-            else:
-                alpha_loss = 0.0
-                alpha = self.config.alpha_multiplier
-
-            # Q forward
-            q_new_actions = torch.min(self.qf["qf1"](observations, new_actions), self.qf["qf2"](observations, new_actions))
-            policy_loss = (alpha * log_pi - q_new_actions).mean()
-
+            # calculate current Q value
             q1_pred = self.qf["qf1"](observations, actions)
             q2_pred = self.qf["qf2"](observations, actions)
             if self.config.cql_max_target_backup:
@@ -145,9 +132,6 @@ class Trainer(object):
                     alpha_prime = torch.clip(torch.exp(self.log_alpha_prime()), 0.0, 1000000.0)
                     cql_min_qf1_loss = alpha_prime * cql_min_q_weight * (cql_qf1_diff - self.config.cql_target_action_gap)
                     cql_min_qf2_loss = alpha_prime * cql_min_q_weight * (cql_qf2_diff - self.config.cql_target_action_gap)
-                    alpha_prime_loss = (-cql_min_qf1_loss - cql_min_qf2_loss) * 0.5
-                    
-
                 else:
                     cql_min_qf1_loss = cql_qf1_diff * cql_min_q_weight
                     cql_min_qf2_loss = cql_qf2_diff * cql_min_q_weight
@@ -156,25 +140,43 @@ class Trainer(object):
                 qf_loss = qf1_loss + qf2_loss + cql_min_qf1_loss + cql_min_qf2_loss
             else:
                 qf_loss = qf1_loss + qf2_loss
+        self.optimizers['qf'].zero_grad()
+        self.scaler.scale(qf_loss).backward(retain_graph=True if (use_cql and self.config.cql_lagrange) else False)
+        self.scaler.step(self.optimizers['qf'])
+        self.scaler.update()
+        
+        # update largange
         if self.config.cql_lagrange and use_cql:
+            with autocast(device_type=observations.device.type, enabled=torch.is_autocast_enabled()):
+                alpha_prime_loss = (-cql_min_qf1_loss - cql_min_qf2_loss) * 0.5
             self.optimizers["log_alpha_prime"].zero_grad()
-            self.scaler.scale(alpha_prime_loss).backward(retain_graph=True)
+            self.scaler.scale(alpha_prime_loss).backward()
             self.scaler.step(self.optimizers["log_alpha_prime"])
+            self.scaler.update()
 
-        if self.config.use_automatic_entropy_tuning:
-            self.optimizers["log_alpha"].zero_grad()
-            self.scaler.scale(alpha_loss).backward()
-            self.scaler.step(self.optimizers["log_alpha"])
-
+        # Policy forward
+        with autocast(device_type=observations.device.type, enabled=torch.is_autocast_enabled()):
+            new_actions, log_pi = self.policy(observations)
+            q_new_actions = torch.min(self.qf["qf1"](observations, new_actions), self.qf["qf2"](observations, new_actions))
+            alpha = torch.exp(self.log_alpha()) * self.config.alpha_multiplier if self.config.use_automatic_entropy_tuning else self.config.alpha_multiplier
+            policy_loss = (alpha.detach() * log_pi - q_new_actions.detach()).mean()
+        
         self.optimizers["policy"].zero_grad()
         self.scaler.scale(policy_loss).backward()
         self.scaler.step(self.optimizers["policy"])
-
-        self.optimizers["qf"].zero_grad()
-        self.scaler.scale(qf_loss).backward()
-        self.scaler.step(self.optimizers["qf"])
         self.scaler.update()
 
+        # update alpha
+        if self.config.use_automatic_entropy_tuning:
+            with autocast(device_type=observations.device.type, enabled=torch.is_autocast_enabled()):
+                alpha_loss = -(self.log_alpha() * (log_pi + self.config.target_entropy).detach()).mean()
+            self.optimizers["log_alpha"].zero_grad()
+            self.scaler.scale(alpha_loss).backward()
+            self.scaler.step(self.optimizers["log_alpha"])
+            self.scaler.update()
+        else:
+            alpha_loss = 0.0
+            
         if self._total_steps % self.config.target_update_interval == 0:
             with torch.no_grad():
                 for target_param, param in zip(self.qf["target_qf1"].parameters(), self.qf["qf1"].parameters()):
