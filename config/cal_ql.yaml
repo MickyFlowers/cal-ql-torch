@@ -43,4 +43,4 @@ enable_calql: true
 n_online_traj_per_epoch: 1
 online_utd_ratio: 1
 device: 'cpu'
-torch_compile_mode: "default"
+torch_compile_mode: "max-autotune"
