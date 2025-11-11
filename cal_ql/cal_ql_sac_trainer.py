@@ -46,6 +46,10 @@ class Trainer(object):
         rewards = batch["rewards"]
         next_observations = batch["next_observations"]
         dones = batch["dones"]
+
+        with torch.no_grad():
+            alpha = torch.exp(self.log_alpha()) * self.config.alpha_multiplier if self.config.use_automatic_entropy_tuning else self.config.alpha_multiplier
+
         # critic update
         with autocast(device_type=observations.device.type, enabled=torch.is_autocast_enabled()):
             # calculate current Q value
@@ -158,8 +162,7 @@ class Trainer(object):
         with autocast(device_type=observations.device.type, enabled=torch.is_autocast_enabled()):
             new_actions, log_pi = self.policy(observations)
             q_new_actions = torch.min(self.qf["qf1"](observations, new_actions), self.qf["qf2"](observations, new_actions))
-            alpha = torch.exp(self.log_alpha()) * self.config.alpha_multiplier if self.config.use_automatic_entropy_tuning else self.config.alpha_multiplier
-            policy_loss = (alpha.detach() * log_pi - q_new_actions.detach()).mean()
+            policy_loss = (alpha * log_pi - q_new_actions).mean()
         
         self.optimizers["policy"].zero_grad()
         self.scaler.scale(policy_loss).backward()
