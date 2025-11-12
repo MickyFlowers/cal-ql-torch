@@ -6,3 +6,4 @@ hydra-core
 omegaconf
 wandb
 python-dateutil
+d4rl @ git+https://github.com/Farama-Foundation/d4rl@master#egg=d4rl
