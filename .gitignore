@@ -5,3 +5,4 @@ __pycache__/
 *.egg
 outputs/
 .vscode/
+**/wandb_config.yaml
