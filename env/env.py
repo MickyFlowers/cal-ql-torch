@@ -5,6 +5,7 @@ import numpy as np
 from xlib.algo.controller import AdmittanceController
 from xlib.algo.filter import MovingAverageFilter
 from xlib.algo.utils.transforms import velTransform
+from xlib.device.keyboard import KeyboardReader
 from xlib.device.manipulator import UR
 from xlib.device.sensor import Ft300sSensor, RealSenseCamera
 
@@ -46,7 +47,9 @@ class UrEnv(object):
 
         self.running = False
         self._env_steps = 0
-
+        
+        self.keyboard_reader = KeyboardReader()
+    
     @property
     def env_steps(self):
         return self._env_steps
@@ -109,6 +112,7 @@ class UrEnv(object):
                 time.sleep(1.0 / self.config.ctrl_freq - elapsed_time)
 
     def step(self, target_pose):
+        
         start_time = time.perf_counter()
         with self.target_pose_lock:
             self.target_pose = target_pose.copy()
@@ -118,10 +122,18 @@ class UrEnv(object):
             time.sleep(1.0 / self.config.action_freq - elapsed_time)
 
         next_observations = self.get_observation()
+        
         reward = 0.0
-        
-        
-        
+        done = False
+        info = {"info": "progressing"}
+        if self.keyboard_reader.is_pressed('s'):
+            reward = 1.0
+            done = True
+            info["info"] == "success"
+            
+        if self._env_steps >= self.config.max_env_steps - 1:
+            done = True
+            info["info"] = "max_steps_reached"
         self._env_steps += 1
         return next_observations, reward, done, info
 
@@ -138,3 +150,38 @@ class UrEnv(object):
             "img_obs": img_obs,
         }
         return observation
+
+
+    
+    def reset(self):
+        # ur stop running
+        self.running = False
+        time.sleep(1.0)
+        self.ur_robot.stop()
+        # restet observations
+        self._env_steps = 0
+        with self.obs_lock:
+            self.img_obs = None
+            self.ft_value = None
+            self.tcp_obs = None
+            self.jnt_obs = None
+            
+        print("Environment resetting, moving to init pose...")
+        # move robot to init pose TODO: sample pose
+        pose = None
+        with self.target_pose_lock:
+            self.target_pose = pose.copy()
+        self.ur_robot.moveToPose(pose, asynchronous=False)
+        time.sleep(1.0)
+        
+        # reset start target pose
+        
+        self.running = True
+        
+        print("Environment resetting, please wait...")
+        while not self._check_obs():
+            time.sleep(0.1)
+        print("Environment reset done.")
+        observations = self.get_observation()
+        
+        return observations

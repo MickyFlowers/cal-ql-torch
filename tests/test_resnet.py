@@ -5,7 +5,7 @@ import torch
 from PIL import Image
 
 
-def extend_and_repeat(tensor, dim, repeat):
+def extend_and_repeat(tensor: torch.Tensor, dim: int, repeat: int) -> torch.Tensor:
     # Extend and repeast the tensor along dim axie and repeat it
     ones_shape = [1 for _ in range(tensor.ndim + 1)]
     ones_shape[dim] = repeat
@@ -15,7 +15,7 @@ img = Image.open(urlopen(
     'https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/beignets-task-guide.png'
 ))
 print("Image size:", img.size)
-model = timm.create_model('resnet18.a1_in1k', pretrained=True, features_only=True, out_indices=(4,))
+model = timm.create_model('resnet18', pretrained=True, features_only=True, out_indices=(4,))
 model = model.eval()
 print("Model created.")
 
