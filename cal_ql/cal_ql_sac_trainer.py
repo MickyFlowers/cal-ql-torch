@@ -41,7 +41,7 @@ class Trainer(object):
         return metrics
     
     @torch.compile(options={"triton.cudagraphs": True}, fullgraph=True)
-    def _train_step(self, batch, use_cql=True, cql_min_q_weight=5.0, enable_calql=False):
+    def _compute_loss(self, batch, use_cql=True, cql_min_q_weight=5.0, enable_calql=False):
         observations = batch["observations"]['proprio'].to(self.device)
         images = batch["observations"]['image'].to(self.device)
         next_observations = batch["next_observations"]['proprio'].to(self.device)
@@ -164,6 +164,14 @@ class Trainer(object):
                 qf_loss = qf1_loss + qf2_loss + cql_min_qf1_loss + cql_min_qf2_loss
             else:
                 qf_loss = qf1_loss + qf2_loss
+        return policy_loss, qf_loss, alpha_loss, alpha_prime_loss
+
+
+    
+    def _train_step(self, batch, use_cql=True, cql_min_q_weight=5.0, enable_calql=False):
+        policy_loss, qf_loss,  alpha_loss, alpha_prime_loss = self._compute_loss(
+            batch, use_cql=use_cql, cql_min_q_weight=cql_min_q_weight, enable_calql=enable_calql
+        )
         if self.config.cql_lagrange and use_cql:
             self.optimizers["log_alpha_prime"].zero_grad()
             self.scaler.scale(alpha_prime_loss).backward(retain_graph=True)
