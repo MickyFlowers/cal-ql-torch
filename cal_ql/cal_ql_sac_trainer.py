@@ -68,12 +68,12 @@ class Trainer(object):
         with autocast(device_type=observations.device.type, enabled=torch.is_autocast_enabled()):
             new_actions, log_pi = self.policy(observations, images)
 
-            if self.config.use_automatic_entropy_tuning:
-                alpha_loss = -(self.log_alpha() * (log_pi + self.config.target_entropy).detach()).mean()
-                alpha = torch.exp(self.log_alpha()) * self.config.alpha_multiplier
+            if train_config.use_automatic_entropy_tuning:
+                alpha_loss = -(self.log_alpha() * (log_pi + train_config.target_entropy).detach()).mean()
+                alpha = torch.exp(self.log_alpha()) * train_config.alpha_multiplier
             else:
                 alpha_loss = 0.0
-                alpha = self.config.alpha_multiplier
+                alpha = train_config.alpha_multiplier
 
             # Q forward
             
@@ -82,8 +82,8 @@ class Trainer(object):
 
             q1_pred = self.qf["qf1"](observations, images, actions)
             q2_pred = self.qf["qf2"](observations, images, actions)
-            if self.config.cql_max_target_backup:
-                new_next_actions, next_log_pi = self.policy(next_observations, next_images, repeat=self.config.cql_n_actions)
+            if train_config.cql_max_target_backup:
+                new_next_actions, next_log_pi = self.policy(next_observations, next_images, repeat=train_config.cql_n_actions)
                 target_q_values = torch.min(
                     self.qf["target_qf1"](next_observations, next_images, new_next_actions),
                     self.qf["target_qf2"](next_observations, next_images, new_next_actions),
@@ -97,19 +97,19 @@ class Trainer(object):
                     self.qf["target_qf1"](next_observations, next_images, new_next_actions),
                     self.qf["target_qf2"](next_observations, next_images, new_next_actions),
                 )
-            if self.config.backup_entropy:
+            if train_config.backup_entropy:
                 target_q_values = target_q_values - alpha * next_log_pi
-            td_target = rewards + (1.0 - dones) * self.config.discount * target_q_values
+            td_target = rewards + (1.0 - dones) * train_config.discount * target_q_values
             qf1_loss = nn.functional.mse_loss(q1_pred, td_target.detach())
             qf2_loss = nn.functional.mse_loss(q2_pred, td_target.detach())
             if train_config.use_cql:
                 batch_size = actions.shape[0]
                 action_dim = actions.shape[-1]
-                cql_random_actions = torch.rand(batch_size, self.config.cql_n_actions, action_dim) * 2 - 1
+                cql_random_actions = torch.rand(batch_size, train_config.cql_n_actions, action_dim) * 2 - 1
                 cql_random_actions = cql_random_actions.to(observations.device)
-                cql_current_actions, cql_current_log_pis = self.policy(observations, images, repeat=self.config.cql_n_actions)
+                cql_current_actions, cql_current_log_pis = self.policy(observations, images, repeat=train_config.cql_n_actions)
                 cql_current_actions, cql_current_log_pis = cql_current_actions.detach(), cql_current_log_pis.detach()
-                cql_next_actions, cql_next_log_pis = self.policy(next_observations, next_images, repeat=self.config.cql_n_actions)
+                cql_next_actions, cql_next_log_pis = self.policy(next_observations, next_images, repeat=train_config.cql_n_actions)
                 cql_next_actions, cql_next_log_pis = cql_next_actions.detach(), cql_next_log_pis.detach()
                 cql_q1_rand = self.qf["qf1"](observations, images, cql_random_actions)
                 cql_q2_rand = self.qf["qf2"](observations, images, cql_random_actions)
@@ -133,7 +133,7 @@ class Trainer(object):
                 )
                 cql_std_q1 = torch.std(cql_cat_q1, dim=1)
                 cql_std_q2 = torch.std(cql_cat_q2, dim=1)
-                if self.config.cql_importance_sample:
+                if train_config.cql_importance_sample:
                     random_density = np.log(0.5**action_dim)
                     cql_cat_q1 = torch.cat(
                         [
@@ -151,18 +151,18 @@ class Trainer(object):
                         ],
                         dim=1,
                     )
-                cql_qf1_ood = torch.logsumexp(cql_cat_q1 / self.config.cql_temp, dim=1) * self.config.cql_temp
-                cql_qf2_ood = torch.logsumexp(cql_cat_q2 / self.config.cql_temp, dim=1) * self.config.cql_temp
+                cql_qf1_ood = torch.logsumexp(cql_cat_q1 / train_config.cql_temp, dim=1) * train_config.cql_temp
+                cql_qf2_ood = torch.logsumexp(cql_cat_q2 / train_config.cql_temp, dim=1) * train_config.cql_temp
                 cql_qf1_diff = torch.clip(
-                    cql_qf1_ood - q1_pred, self.config.cql_clip_diff_min, self.config.cql_clip_diff_max
+                    cql_qf1_ood - q1_pred, train_config.cql_clip_diff_min, train_config.cql_clip_diff_max
                 ).mean()
                 cql_qf2_diff = torch.clip(
-                    cql_qf2_ood - q2_pred, self.config.cql_clip_diff_min, self.config.cql_clip_diff_max
+                    cql_qf2_ood - q2_pred, train_config.cql_clip_diff_min, train_config.cql_clip_diff_max
                 ).mean()
-                if self.config.cql_lagrange:
+                if train_config.cql_lagrange:
                     alpha_prime = torch.clip(torch.exp(self.log_alpha_prime()), 0.0, 1000000.0)
-                    cql_min_qf1_loss = alpha_prime * train_config.cql_min_q_weight * (cql_qf1_diff - self.config.cql_target_action_gap)
-                    cql_min_qf2_loss = alpha_prime * train_config.cql_min_q_weight * (cql_qf2_diff - self.config.cql_target_action_gap)
+                    cql_min_qf1_loss = alpha_prime * train_config.cql_min_q_weight * (cql_qf1_diff - train_config.cql_target_action_gap)
+                    cql_min_qf2_loss = alpha_prime * train_config.cql_min_q_weight * (cql_qf2_diff - train_config.cql_target_action_gap)
                     alpha_prime_loss = (-cql_min_qf1_loss - cql_min_qf2_loss) * 0.5
                 else:
                     cql_min_qf1_loss = cql_qf1_diff * train_config.cql_min_q_weight
@@ -173,15 +173,15 @@ class Trainer(object):
             else:
                 qf_loss = qf1_loss + qf2_loss
         metrics = dict(
-            log_pi=log_pi.mean().item(),
-            policy_loss=policy_loss.item(),
-            qf1_loss=qf1_loss.item(),
-            qf2_loss=qf2_loss.item(),
-            alpha_loss=alpha_loss.item(),
-            alpha=alpha.item(),
-            average_qf1=q1_pred.mean().item(),
-            average_qf2=q2_pred.mean().item(),
-            average_target_q=target_q_values.mean().item(),
+            log_pi=log_pi.mean(),
+            policy_loss=policy_loss,
+            qf1_loss=qf1_loss,
+            qf2_loss=qf2_loss,
+            alpha_loss=alpha_loss,
+            alpha=alpha,
+            average_qf1=q1_pred.mean(),
+            average_qf2=q2_pred.mean(),
+            average_target_q=target_q_values.mean(),
             total_steps=self._total_steps,
         )
         metrics.update(use_cql=int(train_config.use_cql), enable_calql=int(train_config.enable_calql), cql_min_q_weight=train_config.cql_min_q_weight)
@@ -189,20 +189,20 @@ class Trainer(object):
             metrics.update(
                 prefix_metrics(
                     dict(
-                        cql_std_q1=cql_std_q1.mean().item(),
-                        cql_std_q2=cql_std_q2.mean().item(),
-                        cql_q1_rand=cql_q1_rand.mean().item(),
-                        cql_q2_rand=cql_q2_rand.mean().item(),
-                        cql_min_qf1_loss=cql_min_qf1_loss.mean().item(),
-                        cql_min_qf2_loss=cql_min_qf2_loss.mean().item(),
-                        cql_qf1_diff=cql_qf1_diff.mean().item(),
-                        cql_qf2_diff=cql_qf2_diff.mean().item(),
-                        cql_q1_current_actions=cql_q1_current_actions.mean().item(),
-                        cql_q2_current_actions=cql_q2_current_actions.mean().item(),
-                        cql_q1_next_actions=cql_q1_next_actions.mean().item(),
-                        cql_q2_next_actions=cql_q2_next_actions.mean().item(),
-                        alpha_prime_loss=alpha_prime_loss.item(),
-                        alpha_prime=alpha_prime.item(),
+                        cql_std_q1=cql_std_q1.mean(),
+                        cql_std_q2=cql_std_q2.mean(),
+                        cql_q1_rand=cql_q1_rand.mean(),
+                        cql_q2_rand=cql_q2_rand.mean(),
+                        cql_min_qf1_loss=cql_min_qf1_loss.mean(),
+                        cql_min_qf2_loss=cql_min_qf2_loss.mean(),
+                        cql_qf1_diff=cql_qf1_diff.mean(),
+                        cql_qf2_diff=cql_qf2_diff.mean(),
+                        cql_q1_current_actions=cql_q1_current_actions.mean(),
+                        cql_q2_current_actions=cql_q2_current_actions.mean(),
+                        cql_q1_next_actions=cql_q1_next_actions.mean(),
+                        cql_q2_next_actions=cql_q2_next_actions.mean(),
+                        alpha_prime_loss=alpha_prime_loss,
+                        alpha_prime=alpha_prime,
                     ),
                     "cql",
                 )
@@ -268,7 +268,9 @@ class Trainer(object):
                 for target_param, param in zip(self.qf["target_qf2"].parameters(), self.qf["qf2"].parameters()):
                     target_param.data.mul_(1 - self.config.soft_target_update_rate)
                     target_param.data.add_(self.config.soft_target_update_rate * param.data)
-        return metrics
+        
+        final_metrics = {k: v.item() if isinstance(v, torch.Tensor) else v for k, v in metrics.items()}
+        return final_metrics
 
     def to_device(self, device):
         self.device = device
