@@ -164,42 +164,6 @@ class Trainer(object):
                 qf_loss = qf1_loss + qf2_loss + cql_min_qf1_loss + cql_min_qf2_loss
             else:
                 qf_loss = qf1_loss + qf2_loss
-        return policy_loss, qf_loss, alpha_loss, alpha_prime_loss
-
-
-    
-    def _train_step(self, batch, use_cql=True, cql_min_q_weight=5.0, enable_calql=False):
-        policy_loss, qf_loss,  alpha_loss, alpha_prime_loss = self._compute_loss(
-            batch, use_cql=use_cql, cql_min_q_weight=cql_min_q_weight, enable_calql=enable_calql
-        )
-        if self.config.cql_lagrange and use_cql:
-            self.optimizers["log_alpha_prime"].zero_grad()
-            self.scaler.scale(alpha_prime_loss).backward(retain_graph=True)
-            self.scaler.step(self.optimizers["log_alpha_prime"])
-
-        if self.config.use_automatic_entropy_tuning:
-            self.optimizers["log_alpha"].zero_grad()
-            self.scaler.scale(alpha_loss).backward()
-            self.scaler.step(self.optimizers["log_alpha"])
-
-        self.optimizers["policy"].zero_grad()
-        self.scaler.scale(policy_loss).backward()
-        self.scaler.step(self.optimizers["policy"])
-
-        self.optimizers["qf"].zero_grad()
-        self.scaler.scale(qf_loss).backward()
-        self.scaler.step(self.optimizers["qf"])
-        self.scaler.update()
-
-        if self._total_steps % self.config.target_update_interval == 0:
-            with torch.no_grad():
-                for target_param, param in zip(self.qf["target_qf1"].parameters(), self.qf["qf1"].parameters()):
-                    target_param.data.mul_(1 - self.config.soft_target_update_rate)
-                    target_param.data.add_(self.config.soft_target_update_rate * param.data)
-                for target_param, param in zip(self.qf["target_qf2"].parameters(), self.qf["qf2"].parameters()):
-                    target_param.data.mul_(1 - self.config.soft_target_update_rate)
-                    target_param.data.add_(self.config.soft_target_update_rate * param.data)
-
         metrics = dict(
             log_pi=log_pi.mean().item(),
             policy_loss=policy_loss.item(),
@@ -235,7 +199,44 @@ class Trainer(object):
                     "cql",
                 )
             )
+        return policy_loss, qf_loss, alpha_loss, alpha_prime_loss, metrics
+
+
+    
+    def _train_step(self, batch, use_cql=True, cql_min_q_weight=5.0, enable_calql=False):
+        policy_loss, qf_loss,  alpha_loss, alpha_prime_loss, metrics = self._compute_loss(
+            batch, use_cql=use_cql, cql_min_q_weight=cql_min_q_weight, enable_calql=enable_calql
+        )
+        if self.config.cql_lagrange and use_cql:
+            self.optimizers["log_alpha_prime"].zero_grad()
+            self.scaler.scale(alpha_prime_loss).backward(retain_graph=True)
+            self.scaler.step(self.optimizers["log_alpha_prime"])
+
+        if self.config.use_automatic_entropy_tuning:
+            self.optimizers["log_alpha"].zero_grad()
+            self.scaler.scale(alpha_loss).backward()
+            self.scaler.step(self.optimizers["log_alpha"])
+
+        self.optimizers["policy"].zero_grad()
+        self.scaler.scale(policy_loss).backward()
+        self.scaler.step(self.optimizers["policy"])
+
+        self.optimizers["qf"].zero_grad()
+        self.scaler.scale(qf_loss).backward()
+        self.scaler.step(self.optimizers["qf"])
+        self.scaler.update()
+
+        if self._total_steps % self.config.target_update_interval == 0:
+            with torch.no_grad():
+                for target_param, param in zip(self.qf["target_qf1"].parameters(), self.qf["qf1"].parameters()):
+                    target_param.data.mul_(1 - self.config.soft_target_update_rate)
+                    target_param.data.add_(self.config.soft_target_update_rate * param.data)
+                for target_param, param in zip(self.qf["target_qf2"].parameters(), self.qf["qf2"].parameters()):
+                    target_param.data.mul_(1 - self.config.soft_target_update_rate)
+                    target_param.data.add_(self.config.soft_target_update_rate * param.data)
         return metrics
+
+        
 
     def to_device(self, device):
         self.device = device
