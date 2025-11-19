@@ -39,17 +39,25 @@ class Trainer(object):
         self._total_steps += 1
         metrics = self._train_step(batch, use_cql=use_cql, cql_min_q_weight=cql_min_q_weight, enable_calql=enable_calql)
         return metrics
-
+    
+    @torch.compile(options={"triton.cudagraphs": True}, fullgraph=True)
     def _train_step(self, batch, use_cql=True, cql_min_q_weight=5.0, enable_calql=False):
-        observations = batch["observations"]
-        actions = batch["actions"]
-        rewards = batch["rewards"]
-        next_observations = batch["next_observations"]
-        dones = batch["dones"]
+        observations = batch["observations"]['proprio'].to(self.device)
+        images = batch["observations"]['image'].to(self.device)
+        next_observations = batch["next_observations"]['proprio'].to(self.device)
+        next_images = batch["next_observations"]['image'].to(self.device)
+        actions = batch["action"].to(self.device)
+        rewards = batch["reward"].to(self.device)
+        dones = batch["done"].to(self.device)
+        # observations = batch["observations"]
+        # actions = batch["actions"]
+        # rewards = batch["rewards"]
+        # next_observations = batch["next_observations"]
+        # dones = batch["dones"]
         
         # Policy forward
         with autocast(device_type=observations.device.type, enabled=torch.is_autocast_enabled()):
-            new_actions, log_pi = self.policy(observations)
+            new_actions, log_pi = self.policy(observations, images)
 
             if self.config.use_automatic_entropy_tuning:
                 alpha_loss = -(self.log_alpha() * (log_pi + self.config.target_entropy).detach()).mean()
@@ -59,25 +67,26 @@ class Trainer(object):
                 alpha = self.config.alpha_multiplier
 
             # Q forward
-            q_new_actions = torch.min(self.qf["qf1"](observations, new_actions), self.qf["qf2"](observations, new_actions))
+            
+            q_new_actions = torch.min(self.qf["qf1"](observations, images, new_actions), self.qf["qf2"](observations, images, new_actions))
             policy_loss = (alpha.detach() * log_pi - q_new_actions).mean()
 
-            q1_pred = self.qf["qf1"](observations, actions)
-            q2_pred = self.qf["qf2"](observations, actions)
+            q1_pred = self.qf["qf1"](observations, images, actions)
+            q2_pred = self.qf["qf2"](observations, images, actions)
             if self.config.cql_max_target_backup:
-                new_next_actions, next_log_pi = self.policy(next_observations, repeat=self.config.cql_n_actions)
+                new_next_actions, next_log_pi = self.policy(next_observations, next_images, repeat=self.config.cql_n_actions)
                 target_q_values = torch.min(
-                    self.qf["target_qf1"](next_observations, new_next_actions),
-                    self.qf["target_qf2"](next_observations, new_next_actions),
+                    self.qf["target_qf1"](next_observations, next_images, new_next_actions),
+                    self.qf["target_qf2"](next_observations, next_images, new_next_actions),
                 )
                 max_target_indices = torch.argmax(target_q_values, dim=-1, keepdim=True)
                 target_q_values = torch.gather(target_q_values, dim=-1, index=max_target_indices).squeeze(-1)
                 next_log_pi = torch.gather(next_log_pi, dim=-1, index=max_target_indices).squeeze(-1)
             else:
-                new_next_actions, next_log_pi = self.policy(next_observations)
+                new_next_actions, next_log_pi = self.policy(next_observations, next_images)
                 target_q_values = torch.min(
-                    self.qf["target_qf1"](next_observations, new_next_actions),
-                    self.qf["target_qf2"](next_observations, new_next_actions),
+                    self.qf["target_qf1"](next_observations, next_images, new_next_actions),
+                    self.qf["target_qf2"](next_observations, next_images, new_next_actions),
                 )
             if self.config.backup_entropy:
                 target_q_values = target_q_values - alpha * next_log_pi
@@ -89,18 +98,19 @@ class Trainer(object):
                 action_dim = actions.shape[-1]
                 cql_random_actions = torch.rand(batch_size, self.config.cql_n_actions, action_dim) * 2 - 1
                 cql_random_actions = cql_random_actions.to(observations.device)
-                cql_current_actions, cql_current_log_pis = self.policy(observations, repeat=self.config.cql_n_actions)
+                cql_current_actions, cql_current_log_pis = self.policy(observations, images, repeat=self.config.cql_n_actions)
                 cql_current_actions, cql_current_log_pis = cql_current_actions.detach(), cql_current_log_pis.detach()
-                cql_next_actions, cql_next_log_pis = self.policy(next_observations, repeat=self.config.cql_n_actions)
+                cql_next_actions, cql_next_log_pis = self.policy(next_observations, next_images, repeat=self.config.cql_n_actions)
                 cql_next_actions, cql_next_log_pis = cql_next_actions.detach(), cql_next_log_pis.detach()
-                cql_q1_rand = self.qf["qf1"](observations, cql_random_actions)
-                cql_q2_rand = self.qf["qf2"](observations, cql_random_actions)
-                cql_q1_current_actions = self.qf["qf1"](observations, cql_current_actions)
-                cql_q2_current_actions = self.qf["qf2"](observations, cql_current_actions)
-                cql_q1_next_actions = self.qf["qf1"](observations, cql_next_actions)
-                cql_q2_next_actions = self.qf["qf2"](observations, cql_next_actions)
+                cql_q1_rand = self.qf["qf1"](observations, images, cql_random_actions)
+                cql_q2_rand = self.qf["qf2"](observations, images, cql_random_actions)
+                cql_q1_current_actions = self.qf["qf1"](observations, images, cql_current_actions)
+                cql_q2_current_actions = self.qf["qf2"](observations, images, cql_current_actions)
+                cql_q1_next_actions = self.qf["qf1"](observations, images, cql_next_actions)
+                cql_q2_next_actions = self.qf["qf2"](observations, images, cql_next_actions)
                 """ Cal-QL: prepare for Cal-QL, and calculate how much data will be lower bounded for logging """
-                lower_bounds = batch["mc_returns"].view(-1, 1).repeat(1, cql_q1_current_actions.shape[1])
+                mc_returns = batch["mc_return"].to(self.device)
+                lower_bounds = mc_returns.view(-1, 1).repeat(1, cql_q1_current_actions.shape[1])
                 if enable_calql:
                     cql_q1_current_actions = torch.max(cql_q1_current_actions, lower_bounds)
                     cql_q2_current_actions = torch.max(cql_q2_current_actions, lower_bounds)
@@ -146,8 +156,6 @@ class Trainer(object):
                     cql_min_qf1_loss = alpha_prime * cql_min_q_weight * (cql_qf1_diff - self.config.cql_target_action_gap)
                     cql_min_qf2_loss = alpha_prime * cql_min_q_weight * (cql_qf2_diff - self.config.cql_target_action_gap)
                     alpha_prime_loss = (-cql_min_qf1_loss - cql_min_qf2_loss) * 0.5
-                    
-
                 else:
                     cql_min_qf1_loss = cql_qf1_diff * cql_min_q_weight
                     cql_min_qf2_loss = cql_qf2_diff * cql_min_q_weight
@@ -222,6 +230,7 @@ class Trainer(object):
         return metrics
 
     def to_device(self, device):
+        self.device = device
         self.policy.to(device)
         self.qf['qf1'].to(device)
         self.qf['qf2'].to(device)

@@ -1,0 +1,5 @@
+ft_port: /dev/ttyUSB0
+ft_zero_reset: true
+ft_timeout: 1.0
+ft_filter_window_size: 15
+ft_read_freq: 100.0

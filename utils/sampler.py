@@ -2,7 +2,6 @@ import numpy as np
 
 from utils.d4rl_utils import calc_return_to_go
 
-
 class TrajSampler(object):
     def __init__(
         self,

@@ -1,7 +1,10 @@
 defaults:
   - cal_ql: cal_ql_defaults
   - logging: logging_defaults
+  - dataset: dataset_defaults
 
+observation_dim: 12
+action_dim: 6
 # Core experiment settings
 env: antmaze-medium-diverse-v2
 seed: 42

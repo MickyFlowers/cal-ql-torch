@@ -1,0 +1,42 @@
+defaults:
+  - cal_ql: cal_ql_defaults
+  - logging: logging_defaults
+  - dataset: dataset_defaults
+
+observation_dim: 12
+action_dim: 6
+
+
+seed: 42
+save_model: false
+batch_size: 32
+num_workers: 4
+
+
+# Architecture & policy hyperparameters
+hidden_dim: 256
+orthogonal_init: true
+
+policy_obs_proj_arch: '256-256'
+policy_out_proj_arch: '256-256'
+policy_log_std_multiplier: 1.0
+policy_log_std_offset: -1.0
+train_policy_backbone: true
+
+q_obs_proj_arch: '256-256'
+q_out_proj_arch: '256-256'
+train_q_backbone: true
+
+
+# Offline pretraining / online finetuning schedule
+n_train_step_per_epoch_offline: 1000
+train_offline_epochs: 100
+
+# CQL related toggles
+use_cql: true
+cql_min_q_weight: 5.0
+cql_min_q_weight_online: -1.0  # -1 => keep previous value
+enable_calql: true
+
+device: 'cpu'
+torch_compile_mode: "max-autotune"

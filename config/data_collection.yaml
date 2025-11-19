@@ -1,0 +1,9 @@
+defaults:
+  - env: env
+
+teach_mode: true
+num_data: 100
+save_path: ./dataset/offline_rl_data_11_17_20
+dt: 0.01
+max_linear_vel: 0.3
+max_angular_vel: 1.0
