@@ -41,14 +41,8 @@ class Trainer(object):
         return metrics
     
     @torch.compile(options={"triton.cudagraphs": True}, fullgraph=True)
-    def _compute_loss(self, batch, use_cql=True, cql_min_q_weight=5.0, enable_calql=False):
-        observations = batch["observations"]['proprio'].to(self.device)
-        images = batch["observations"]['image'].to(self.device)
-        next_observations = batch["next_observations"]['proprio'].to(self.device)
-        next_images = batch["next_observations"]['image'].to(self.device)
-        actions = batch["action"].to(self.device)
-        rewards = batch["reward"].to(self.device)
-        dones = batch["done"].to(self.device)
+    def _compute_loss(self, observations, images, next_observations, next_images, actions, rewards, dones, use_cql=True, cql_min_q_weight=5.0, enable_calql=False):
+        
         # observations = batch["observations"]
         # actions = batch["actions"]
         # rewards = batch["rewards"]
@@ -204,8 +198,15 @@ class Trainer(object):
 
     
     def _train_step(self, batch, use_cql=True, cql_min_q_weight=5.0, enable_calql=False):
+        observations = batch["observations"]['proprio'].to(self.device)
+        images = batch["observations"]['image'].to(self.device)
+        next_observations = batch["next_observations"]['proprio'].to(self.device)
+        next_images = batch["next_observations"]['image'].to(self.device)
+        actions = batch["action"].to(self.device)
+        rewards = batch["reward"].to(self.device)
+        dones = batch["done"].to(self.device)
         policy_loss, qf_loss,  alpha_loss, alpha_prime_loss, metrics = self._compute_loss(
-            batch, use_cql=use_cql, cql_min_q_weight=cql_min_q_weight, enable_calql=enable_calql
+            observations, images, next_observations, next_images, actions, rewards, dones, use_cql=use_cql, cql_min_q_weight=cql_min_q_weight, enable_calql=enable_calql
         )
         if self.config.cql_lagrange and use_cql:
             self.optimizers["log_alpha_prime"].zero_grad()
