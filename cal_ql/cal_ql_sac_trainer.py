@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -7,6 +9,25 @@ from torch.amp import GradScaler, autocast
 from model.model import Scaler
 from utils.utils import prefix_metrics
 
+
+@dataclass
+class TrainConfig:
+    use_cql: bool
+    cql_min_q_weight: float
+    enable_calql: bool
+    cql_max_target_backup: bool
+    backup_entropy: bool
+    discount: float
+    cql_n_actions: int
+    cql_importance_sample: bool
+    cql_temp: float
+    cql_clip_diff_min: float
+    cql_clip_diff_max: float
+    cql_lagrange: bool
+    cql_target_action_gap: float
+    use_automatic_entropy_tuning: bool
+    target_entropy: float
+    alpha_multiplier: float
 
 class Trainer(object):
     def __init__(self, config, policy, qf):
@@ -41,19 +62,7 @@ class Trainer(object):
         return metrics
     
     @torch.compile(options={"triton.cudagraphs": True}, fullgraph=True)
-    def _compute_loss(self, batch, use_cql=True, cql_min_q_weight=5.0, enable_calql=False):
-        observations = batch["observations"]['proprio'].to(self.device)
-        images = batch["observations"]['image'].to(self.device)
-        next_observations = batch["next_observations"]['proprio'].to(self.device)
-        next_images = batch["next_observations"]['image'].to(self.device)
-        actions = batch["action"].to(self.device)
-        rewards = batch["reward"].to(self.device)
-        dones = batch["done"].to(self.device)
-        # observations = batch["observations"]
-        # actions = batch["actions"]
-        # rewards = batch["rewards"]
-        # next_observations = batch["next_observations"]
-        # dones = batch["dones"]
+    def _compute_loss(self, observations, images, actions, rewards, dones, next_observations, next_images, mc_returns, train_config: TrainConfig):
         
         # Policy forward
         with autocast(device_type=observations.device.type, enabled=torch.is_autocast_enabled()):
@@ -93,7 +102,7 @@ class Trainer(object):
             td_target = rewards + (1.0 - dones) * self.config.discount * target_q_values
             qf1_loss = nn.functional.mse_loss(q1_pred, td_target.detach())
             qf2_loss = nn.functional.mse_loss(q2_pred, td_target.detach())
-            if use_cql:
+            if train_config.use_cql:
                 batch_size = actions.shape[0]
                 action_dim = actions.shape[-1]
                 cql_random_actions = torch.rand(batch_size, self.config.cql_n_actions, action_dim) * 2 - 1
@@ -109,9 +118,8 @@ class Trainer(object):
                 cql_q1_next_actions = self.qf["qf1"](observations, images, cql_next_actions)
                 cql_q2_next_actions = self.qf["qf2"](observations, images, cql_next_actions)
                 """ Cal-QL: prepare for Cal-QL, and calculate how much data will be lower bounded for logging """
-                mc_returns = batch["mc_return"].to(self.device)
                 lower_bounds = mc_returns.view(-1, 1).repeat(1, cql_q1_current_actions.shape[1])
-                if enable_calql:
+                if train_config.enable_calql:
                     cql_q1_current_actions = torch.max(cql_q1_current_actions, lower_bounds)
                     cql_q2_current_actions = torch.max(cql_q2_current_actions, lower_bounds)
                     cql_q1_next_actions = torch.max(cql_q1_next_actions, lower_bounds)
@@ -153,12 +161,12 @@ class Trainer(object):
                 ).mean()
                 if self.config.cql_lagrange:
                     alpha_prime = torch.clip(torch.exp(self.log_alpha_prime()), 0.0, 1000000.0)
-                    cql_min_qf1_loss = alpha_prime * cql_min_q_weight * (cql_qf1_diff - self.config.cql_target_action_gap)
-                    cql_min_qf2_loss = alpha_prime * cql_min_q_weight * (cql_qf2_diff - self.config.cql_target_action_gap)
+                    cql_min_qf1_loss = alpha_prime * train_config.cql_min_q_weight * (cql_qf1_diff - self.config.cql_target_action_gap)
+                    cql_min_qf2_loss = alpha_prime * train_config.cql_min_q_weight * (cql_qf2_diff - self.config.cql_target_action_gap)
                     alpha_prime_loss = (-cql_min_qf1_loss - cql_min_qf2_loss) * 0.5
                 else:
-                    cql_min_qf1_loss = cql_qf1_diff * cql_min_q_weight
-                    cql_min_qf2_loss = cql_qf2_diff * cql_min_q_weight
+                    cql_min_qf1_loss = cql_qf1_diff * train_config.cql_min_q_weight
+                    cql_min_qf2_loss = cql_qf2_diff * train_config.cql_min_q_weight
                     alpha_prime_loss = torch.tensor(0.0)
                     alpha_prime = torch.tensor(0.0)
                 qf_loss = qf1_loss + qf2_loss + cql_min_qf1_loss + cql_min_qf2_loss
@@ -176,8 +184,8 @@ class Trainer(object):
             average_target_q=target_q_values.mean().item(),
             total_steps=self._total_steps,
         )
-        metrics.update(use_cql=int(use_cql), enable_calql=int(enable_calql), cql_min_q_weight=cql_min_q_weight)
-        if use_cql:
+        metrics.update(use_cql=int(train_config.use_cql), enable_calql=int(train_config.enable_calql), cql_min_q_weight=train_config.cql_min_q_weight)
+        if train_config.use_cql:
             metrics.update(
                 prefix_metrics(
                     dict(
@@ -204,11 +212,36 @@ class Trainer(object):
 
     
     def _train_step(self, batch, use_cql=True, cql_min_q_weight=5.0, enable_calql=False):
-
-        policy_loss, qf_loss,  alpha_loss, alpha_prime_loss, metrics = self._compute_loss(
-            batch, use_cql=use_cql, cql_min_q_weight=cql_min_q_weight, enable_calql=enable_calql
+        observations = batch["observations"]['proprio'].to(self.device)
+        images = batch["observations"]['image'].to(self.device)
+        next_observations = batch["next_observations"]['proprio'].to(self.device)
+        next_images = batch["next_observations"]['image'].to(self.device)
+        actions = batch["action"].to(self.device)
+        rewards = batch["reward"].to(self.device)
+        dones = batch["done"].to(self.device)
+        mc_returns = batch["mc_return"].to(self.device)
+        train_config = TrainConfig(
+            use_cql=use_cql,
+            cql_min_q_weight=cql_min_q_weight,
+            enable_calql=enable_calql,
+            cql_max_target_backup=self.config.cql_max_target_backup,
+            backup_entropy=self.config.backup_entropy,
+            discount=self.config.discount,
+            cql_n_actions=self.config.cql_n_actions,
+            cql_importance_sample=self.config.cql_importance_sample,
+            cql_temp=self.config.cql_temp,
+            cql_clip_diff_min=self.config.cql_clip_diff_min,
+            cql_clip_diff_max=self.config.cql_clip_diff_max,
+            cql_lagrange=self.config.cql_lagrange,
+            cql_target_action_gap=self.config.cql_target_action_gap,
+            use_automatic_entropy_tuning=self.config.use_automatic_entropy_tuning,
+            target_entropy=self.config.target_entropy,
+            alpha_multiplier=self.config.alpha_multiplier,
         )
-        if self.config.cql_lagrange and use_cql:
+        policy_loss, qf_loss,  alpha_loss, alpha_prime_loss, metrics = self._compute_loss(
+            observations, images, actions, rewards, dones, next_observations, next_images, mc_returns, train_config=train_config
+        )
+        if self.config.cql_lagrange and train_config.use_cql:
             self.optimizers["log_alpha_prime"].zero_grad()
             self.scaler.scale(alpha_prime_loss).backward(retain_graph=True)
             self.scaler.step(self.optimizers["log_alpha_prime"])
