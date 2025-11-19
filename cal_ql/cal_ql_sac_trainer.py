@@ -68,13 +68,11 @@ class Trainer(object):
             "alpha_multiplier": self.config.alpha_multiplier,
         }
 
-        # 3. 调用编译后的函数
         losses, computed_metrics = self._compute_loss_and_metrics(
             observations, images, actions, rewards, next_observations, next_images, dones, mc_returns,
             **static_params
         )
 
-        # 4. 执行优化器步骤 (这部分不应被编译)
         if self.config.cql_lagrange and use_cql:
             self.optimizers["log_alpha_prime"].zero_grad(set_to_none=True)
             self.scaler.scale(losses['alpha_prime_loss']).backward(retain_graph=True)
