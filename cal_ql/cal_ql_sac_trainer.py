@@ -292,7 +292,22 @@ class Trainer(object):
 
         print(f"[Rank {dist.get_rank()}] Trainer multi-GPU setup complete. Device: {device}")
         
-
+    def load_checkpoint(self, filepath):
+        checkpoint = torch.load(filepath, map_location=self.device)
+        self.policy.load_state_dict(checkpoint['policy_state_dict'])
+        self.qf['qf1'].load_state_dict(checkpoint['qf1_state_dict'])
+        self.qf['qf2'].load_state_dict(checkpoint['qf2_state_dict'])
+        self.qf['target_qf1'].load_state_dict(checkpoint['target_qf1_state_dict'])
+        self.qf['target_qf2'].load_state_dict(checkpoint['target_qf2_state_dict'])
+        for k, v in self.optimizers.items():
+            if k + '_state_dict' in checkpoint['optimizers_state_dict']:
+                v.load_state_dict(checkpoint['optimizers_state_dict'][k + '_state_dict'])
+        self._total_steps = checkpoint.get('total_steps', 0)
+        if self.config.use_automatic_entropy_tuning and 'log_alpha_state_dict' in checkpoint:
+            self.log_alpha.load_state_dict(checkpoint['log_alpha_state_dict'])
+        if self.config.cql_lagrange and 'log_alpha_prime_state_dict' in checkpoint:
+            self.log_alpha_prime.load_state_dict(checkpoint['log_alpha_prime_state_dict'])
+        print(f"Loaded checkpoint from {filepath} at total steps {self._total_steps}")
         
     def save_checkpoint(self, filepath):
         checkpoint = {

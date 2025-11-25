@@ -7,7 +7,7 @@ import hydra
 import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
-from torch.utils.data import DataLoader, DistributedSampler
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from cal_ql.cal_ql_sac_trainer import Trainer
@@ -43,7 +43,7 @@ def main(cfg: DictConfig):
         include_exp_prefix_sub_dir=False,
     )
     dataset = CalqlDataset(cfg.dataset)
-    dataloader = torch.utils.data.DataLoader(
+    dataloader = DataLoader(
         dataset,
         batch_size=cfg.batch_size,
         shuffle=True,
@@ -96,7 +96,8 @@ def main(cfg: DictConfig):
     sac = Trainer(cfg.cal_ql, policy, qf)
     # sac.setup_multi_gpu(local_rank)
     sac.to_device(device=device)
-    
+    if cfg.load_ckpt_path != "":
+        sac.load_checkpoint(cfg.load_ckpt_path)
     # print("compiling sac model...")
     # sac.compile(mode=cfg.torch_compile_mode)
 
@@ -133,7 +134,15 @@ def main(cfg: DictConfig):
         if epoch >= cfg.train_offline_epochs:
             print("Finished Training")
             break
-
+        dataset.reload()
+        dataloader = DataLoader(
+            dataset,
+            batch_size=cfg.batch_size,
+            shuffle=True,
+            num_workers=cfg.num_workers,
+            pin_memory=True,
+        )
+        data_iter = data_iter_fn(dataloader)
         with Timer() as train_timer:
             for _ in tqdm(range(n_train_step_per_epoch), desc="Training"):
                 batch = next(data_iter)
