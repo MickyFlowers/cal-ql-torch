@@ -11,3 +11,4 @@ checkpoints/
 
 **.log
 logs/
+temp/
