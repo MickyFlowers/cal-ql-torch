@@ -4,8 +4,8 @@ nohup python -m cal_ql.train_offline_single_gpu \
     logging.online=true \
     torch_compile_mode='default' \
     logging.prefix='offline' \
-    cal_ql.qf_lr=1e-6 \
-    cal_ql.policy_lr=5e-6 \
-    batch_size=128 \
+    cal_ql.qf_lr=1e-5 \
+    cal_ql.policy_lr=5e-5 \
+    batch_size=32 \
     num_workers=8 \
     > logs/train_offline_single_gpu.log 2>&1 &

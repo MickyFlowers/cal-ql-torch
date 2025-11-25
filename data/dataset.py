@@ -12,17 +12,80 @@ from torch.utils.data import DataLoader, Dataset
 from xlib.algo.utils.image_utils import np_buffer_to_pil_image
 
 
+def calc_meta(data_root, episode_files):
+    meta = {"episode_length": []}
+    for episode_file in episode_files:
+        with h5py.File(episode_file, 'r') as f:
+            actions = f['actions'][:]
+            episode_length = actions.shape[0]
+            meta["episode_length"].append(episode_length)
+    meta_file = os.path.join(data_root, "meta.yaml")
+    with open(meta_file, 'w') as f:
+        yaml.dump(meta, f)
+    print(f"Saved meta information to {meta_file}")
+
+def calc_statics(data_root, episode_files):
+    proprio_max = None
+    proprio_min = None
+    action_max = None
+    action_min = None   
+    for file in episode_files:
+        with h5py.File(file, 'r') as f:
+            jnt_obs_sum = np.array(f['observations']['jnt_obs'][:])
+            tcp_obs_sum = np.array(f['observations']['tcp_obs'][:])
+            proprio = np.concatenate([jnt_obs_sum, tcp_obs_sum], axis=-1)
+            if proprio_max is None:
+                proprio_max = np.max(proprio, axis=0)
+            else:
+                max_candidate = np.max(proprio, axis=0)
+                proprio_max = np.maximum(proprio_max, max_candidate)
+            if proprio_min is None:
+                proprio_min = np.min(proprio, axis=0)
+            else:
+                min_candidate = np.min(proprio, axis=0)
+                proprio_min = np.minimum(proprio_min, min_candidate)
+            
+            actions = np.array(f['actions'][:])
+            if action_max is None:
+                action_max = np.max(actions, axis=0)
+            else:
+                max_candidate = np.max(actions, axis=0)
+                action_max = np.maximum(action_max, max_candidate)
+            if action_min is None:
+                action_min = np.min(actions, axis=0)
+            else:
+                min_candidate = np.min(actions, axis=0)
+                action_min = np.minimum(action_min, min_candidate)
+    # save statistics   
+    statistics = {
+        "proprio": {
+            "max": proprio_max.tolist(),
+            "min": proprio_min.tolist(),
+        },
+        "action": {
+            "max": action_max.tolist(),
+            "min": action_min.tolist(),
+        }
+    }
+    with open(os.path.join(data_root, "statistics.yaml"), 'w') as f:
+        yaml.safe_dump(statistics, f, default_flow_style=False, allow_unicode=True)
+
 class CalqlDataset(Dataset):
     def __init__(self, config: DictConfig):
         super().__init__()
         self.config = config
         # parser all episode files
+        
         root_path = config.root_path
-        statics_file = os.path.join(root_path, "statistics.yaml")
-        meta_file = os.path.join(root_path, "meta.yaml")
-        self.episode_files = glob.glob(os.path.join(root_path, "*.hdf5"))
-        self.statistics = self._parser_statstics(statics_file)
-        self.meta = self._parser_meta(meta_file)
+        self.root_path = root_path
+        self.episode_files = glob.glob(os.path.join(self.root_path, "*.hdf5"))
+
+        self.statics_file = os.path.join(self.root_path, "statistics.yaml")
+        self.meta_file = os.path.join(self.root_path, "meta.yaml")
+        calc_statics(self.root_path, self.episode_files)
+        calc_meta(self.root_path, self.episode_files)
+        self.statistics = self._parser_statstics(self.statics_file)
+        self.meta = self._parser_meta(self.meta_file)
         self.image_transform = transforms.Compose([
             transforms.Resize((config.image_resize, config.image_resize)),
             transforms.CenterCrop(config.image_size),
@@ -32,6 +95,14 @@ class CalqlDataset(Dataset):
                 std=[0.229, 0.224, 0.225]
             ),
         ])
+    
+    def reload(self):
+        self.episode_files = glob.glob(os.path.join(self.root_path, "*.hdf5"))
+        calc_statics(self.root_path, self.episode_files)
+        calc_meta(self.root_path, self.episode_files)
+        self.statistics = self._parser_statstics(self.statics_file)
+        self.meta = self._parser_meta(self.meta_file)
+
     def _parser_meta(self, meta_file: str):
         with open(meta_file, 'r') as f:
             meta = yaml.safe_load(f)

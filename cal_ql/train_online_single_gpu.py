@@ -30,7 +30,7 @@ def dict_to_device(batch, device):
             batch[k] = v.to(device=device, non_blocking=True)
     return batch
 
-@hydra.main(config_path="../config", config_name="train_offline", version_base=None)
+@hydra.main(config_path="../config", config_name="train_online", version_base=None)
 def main(cfg: DictConfig):
     device = torch.device("cuda:0")
     variant = OmegaConf.to_container(cfg, resolve=True)

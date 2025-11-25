@@ -24,7 +24,7 @@ policy_log_std_offset: -1.0
 train_policy_backbone: true
 
 q_obs_proj_arch: '256-256'
-q_out_proj_arch: '256-256'
+q_out_proj_arch: '256-256-256-256'
 train_q_backbone: true
 
 
