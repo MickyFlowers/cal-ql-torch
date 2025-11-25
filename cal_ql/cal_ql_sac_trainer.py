@@ -2,9 +2,11 @@ import os
 
 import numpy as np
 import torch
+import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
 from torch.amp import GradScaler, autocast
+from torch.nn.parallel import DistributedDataParallel as DDP
 
 from model.model import Scaler
 from utils.utils import prefix_metrics
@@ -114,10 +116,10 @@ class Trainer(object):
                 mc_returns = batch["mc_return"].to(self.device)
                 lower_bounds = mc_returns.view(-1, 1).repeat(1, cql_q1_current_actions.shape[1])
                 if enable_calql:
-                    cql_q1_current_actions = torch.max(cql_q1_current_actions, lower_bounds)
-                    cql_q2_current_actions = torch.max(cql_q2_current_actions, lower_bounds)
-                    cql_q1_next_actions = torch.max(cql_q1_next_actions, lower_bounds)
-                    cql_q2_next_actions = torch.max(cql_q2_next_actions, lower_bounds)
+                    cql_q1_current_actions = torch.maximum(cql_q1_current_actions, lower_bounds)
+                    cql_q2_current_actions = torch.maximum(cql_q2_current_actions, lower_bounds)
+                    cql_q1_next_actions = torch.maximum(cql_q1_next_actions, lower_bounds)
+                    cql_q2_next_actions = torch.maximum(cql_q2_next_actions, lower_bounds)
 
                 cql_cat_q1 = torch.cat(
                     [cql_q1_rand, q1_pred.unsqueeze(1), cql_q1_next_actions, cql_q1_current_actions], dim=1
@@ -147,14 +149,14 @@ class Trainer(object):
                     )
                 cql_qf1_ood = torch.logsumexp(cql_cat_q1 / self.config.cql_temp, dim=1) * self.config.cql_temp
                 cql_qf2_ood = torch.logsumexp(cql_cat_q2 / self.config.cql_temp, dim=1) * self.config.cql_temp
-                cql_qf1_diff = torch.clip(
+                cql_qf1_diff = torch.clamp(
                     cql_qf1_ood - q1_pred, self.config.cql_clip_diff_min, self.config.cql_clip_diff_max
                 ).mean()
-                cql_qf2_diff = torch.clip(
+                cql_qf2_diff = torch.clamp(
                     cql_qf2_ood - q2_pred, self.config.cql_clip_diff_min, self.config.cql_clip_diff_max
                 ).mean()
                 if self.config.cql_lagrange:
-                    alpha_prime = torch.clip(torch.exp(self.log_alpha_prime()), 0.0, 1000000.0)
+                    alpha_prime = torch.clamp(torch.exp(self.log_alpha_prime()), 0.0, 1000000.0)
                     cql_min_qf1_loss = alpha_prime * cql_min_q_weight * (cql_qf1_diff - self.config.cql_target_action_gap)
                     cql_min_qf2_loss = alpha_prime * cql_min_q_weight * (cql_qf2_diff - self.config.cql_target_action_gap)
                     alpha_prime_loss = (-cql_min_qf1_loss - cql_min_qf2_loss) * 0.5
@@ -188,22 +190,22 @@ class Trainer(object):
         if self._total_steps % self.config.target_update_interval == 0:
             with torch.no_grad():
                 for target_param, param in zip(self.qf["target_qf1"].parameters(), self.qf["qf1"].parameters()):
-                    target_param.data.mul_(1 - self.config.soft_target_update_rate)
-                    target_param.data.add_(self.config.soft_target_update_rate * param.data)
+                    new_param = (1 - self.config.soft_target_update_rate) * target_param.data + self.config.soft_target_update_rate * param.data
+                    target_param.data.copy_(new_param)
                 for target_param, param in zip(self.qf["target_qf2"].parameters(), self.qf["qf2"].parameters()):
-                    target_param.data.mul_(1 - self.config.soft_target_update_rate)
-                    target_param.data.add_(self.config.soft_target_update_rate * param.data)
+                    new_param = (1 - self.config.soft_target_update_rate) * target_param.data + self.config.soft_target_update_rate * param.data
+                    target_param.data.copy_(new_param)
 
         metrics = dict(
-            log_pi=log_pi.mean().item(),
-            policy_loss=policy_loss.item(),
-            qf1_loss=qf1_loss.item(),
-            qf2_loss=qf2_loss.item(),
-            alpha_loss=alpha_loss.item(),
-            alpha=alpha.item(),
-            average_qf1=q1_pred.mean().item(),
-            average_qf2=q2_pred.mean().item(),
-            average_target_q=target_q_values.mean().item(),
+            log_pi=log_pi.mean(),
+            policy_loss=policy_loss,
+            qf1_loss=qf1_loss,
+            qf2_loss=qf2_loss,
+            alpha_loss=alpha_loss,
+            alpha=alpha,
+            average_qf1=q1_pred.mean(),
+            average_qf2=q2_pred.mean(),
+            average_target_q=target_q_values.mean(),
             total_steps=self._total_steps,
         )
         metrics.update(use_cql=int(use_cql), enable_calql=int(enable_calql), cql_min_q_weight=cql_min_q_weight)
@@ -211,20 +213,20 @@ class Trainer(object):
             metrics.update(
                 prefix_metrics(
                     dict(
-                        cql_std_q1=cql_std_q1.mean().item(),
-                        cql_std_q2=cql_std_q2.mean().item(),
-                        cql_q1_rand=cql_q1_rand.mean().item(),
-                        cql_q2_rand=cql_q2_rand.mean().item(),
-                        cql_min_qf1_loss=cql_min_qf1_loss.mean().item(),
-                        cql_min_qf2_loss=cql_min_qf2_loss.mean().item(),
-                        cql_qf1_diff=cql_qf1_diff.mean().item(),
-                        cql_qf2_diff=cql_qf2_diff.mean().item(),
-                        cql_q1_current_actions=cql_q1_current_actions.mean().item(),
-                        cql_q2_current_actions=cql_q2_current_actions.mean().item(),
-                        cql_q1_next_actions=cql_q1_next_actions.mean().item(),
-                        cql_q2_next_actions=cql_q2_next_actions.mean().item(),
-                        alpha_prime_loss=alpha_prime_loss.item(),
-                        alpha_prime=alpha_prime.item(),
+                        cql_std_q1=cql_std_q1.mean(),
+                        cql_std_q2=cql_std_q2.mean(),
+                        cql_q1_rand=cql_q1_rand.mean(),
+                        cql_q2_rand=cql_q2_rand.mean(),
+                        cql_min_qf1_loss=cql_min_qf1_loss.mean(),
+                        cql_min_qf2_loss=cql_min_qf2_loss.mean(),
+                        cql_qf1_diff=cql_qf1_diff.mean(),
+                        cql_qf2_diff=cql_qf2_diff.mean(),
+                        cql_q1_current_actions=cql_q1_current_actions.mean(),
+                        cql_q2_current_actions=cql_q2_current_actions.mean(),
+                        cql_q1_next_actions=cql_q1_next_actions.mean(),
+                        cql_q2_next_actions=cql_q2_next_actions.mean(),
+                        alpha_prime_loss=alpha_prime_loss,
+                        alpha_prime=alpha_prime,
                     ),
                     "cql",
                 )
@@ -264,6 +266,35 @@ class Trainer(object):
         return self._total_steps
     
     
+    def setup_multi_gpu(self, local_rank: int):
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl")
+        
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+        self.to_device(device)
+        self.policy = nn.SyncBatchNorm.convert_sync_batchnorm(self.policy)
+        self.qf['qf1'] = nn.SyncBatchNorm.convert_sync_batchnorm(self.qf['qf1'])
+        self.qf['qf2'] = nn.SyncBatchNorm.convert_sync_batchnorm(self.qf['qf2'])
+
+        self.policy = DDP(self.policy, device_ids=[local_rank], output_device=local_rank)
+        self.qf['qf1'] = DDP(self.qf['qf1'], device_ids=[local_rank], output_device=local_rank)
+        self.qf['qf2'] = DDP(self.qf['qf2'], device_ids=[local_rank], output_device=local_rank)
+
+        self.optimizers["policy"] = torch.optim.Adam(self.policy.parameters(), lr=self.config.policy_lr)
+        self.optimizers["qf"] = torch.optim.Adam(
+            list(self.qf['qf1'].parameters()) + list(self.qf['qf2'].parameters()), lr=self.config.qf_lr
+        )
+        
+        if self.config.use_automatic_entropy_tuning:
+            self.optimizers["log_alpha"] = torch.optim.Adam(self.log_alpha.parameters(), lr=self.config.policy_lr)
+        if self.config.cql_lagrange:
+            self.optimizers["log_alpha_prime"] = torch.optim.Adam(self.log_alpha_prime.parameters(), lr=self.config.qf_lr)
+
+        print(f"[Rank {dist.get_rank()}] Trainer multi-GPU setup complete. Device: {device}")
+        
+
+        
     def save_checkpoint(self, filepath):
         checkpoint = {
             'policy_state_dict': self.policy.state_dict(),

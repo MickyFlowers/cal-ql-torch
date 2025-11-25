@@ -19,8 +19,10 @@ class CalqlDataset(Dataset):
         # parser all episode files
         root_path = config.root_path
         statics_file = os.path.join(root_path, "statistics.yaml")
+        meta_file = os.path.join(root_path, "meta.yaml")
         self.episode_files = glob.glob(os.path.join(root_path, "*.hdf5"))
         self.statistics = self._parser_statstics(statics_file)
+        self.meta = self._parser_meta(meta_file)
         self.image_transform = transforms.Compose([
             transforms.Resize((config.image_resize, config.image_resize)),
             transforms.CenterCrop(config.image_size),
@@ -30,6 +32,10 @@ class CalqlDataset(Dataset):
                 std=[0.229, 0.224, 0.225]
             ),
         ])
+    def _parser_meta(self, meta_file: str):
+        with open(meta_file, 'r') as f:
+            meta = yaml.safe_load(f)
+        return meta
     
     def _parser_statstics(self, statics_file: str):
         with open(statics_file, 'r') as f:
@@ -37,7 +43,7 @@ class CalqlDataset(Dataset):
         return statistics   
     
     def __len__(self):
-        return len(self.episode_files)
+        return np.sum(self.meta['episode_length'])
 
     
     def _normalize(self, data, statistics, norm_type, epsilon=1e-8):
@@ -52,7 +58,10 @@ class CalqlDataset(Dataset):
         return data 
     
     def __getitem__(self, index):
-        episode_file = self.episode_files[index]
+        cum_sum = np.cumsum(self.meta['episode_length'])
+        episode_idx = np.searchsorted(cum_sum, index, side='right')
+        sample_idx = index - (cum_sum[episode_idx - 1] if episode_idx > 0 else 0)
+        episode_file = self.episode_files[episode_idx]
         with h5py.File(episode_file, 'r') as f:
             observations = f['observations']
             jnt_obs = observations['jnt_obs']
@@ -67,10 +76,7 @@ class CalqlDataset(Dataset):
             rewards = rewards * self.config.reward_scale + self.config.reward_bias
             dones = f['dones']
         
-            
             episode_length = jnt_obs.shape[0]
-            
-            sample_idx = np.random.randint(0, episode_length)
             
             jnt = jnt_obs[sample_idx]
             tcp = tcp_obs[sample_idx]

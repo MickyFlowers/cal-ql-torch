@@ -6,7 +6,10 @@ import time
 import hydra
 import numpy as np
 import torch
+import torch.distributed as dist
 from omegaconf import DictConfig, OmegaConf
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
 
 from cal_ql.cal_ql_sac_trainer import Trainer
@@ -25,24 +28,39 @@ def dict_to_device(batch, device):
             batch[k] = v.to(device=device, non_blocking=True)
     return batch
 
+def setup_distributed():
+    dist.init_process_group("nccl")
+    local_rank = int(os.environ["LOCAL_RANK"])
+    torch.cuda.set_device(local_rank)
+    return local_rank, torch.device(f"cuda:{local_rank}")
+
+def cleanup_distributed():
+    dist.destroy_process_group()
+
 @hydra.main(config_path="../config", config_name="train_offline", version_base=None)
 def main(cfg: DictConfig):
+    local_rank, device = setup_distributed()
+    torch.autograd.set_detect_anomaly(True)
     variant = OmegaConf.to_container(cfg, resolve=True)
-    wandb_logger = WandBLogger(config=cfg.logging, variant=variant)
-    setup_logger(
-        variant=variant,
-        exp_id=wandb_logger.experiment_id,
-        seed=cfg.seed,
-        base_log_dir=cfg.logging.output_dir,
-        include_exp_prefix_sub_dir=False,
-    )
+    if dist.get_rank() == 0:
+        wandb_logger = WandBLogger(config=cfg.logging, variant=variant)
+        setup_logger(
+            variant=variant,
+            exp_id=wandb_logger.experiment_id,
+            seed=cfg.seed,
+            base_log_dir=cfg.logging.output_dir,
+            include_exp_prefix_sub_dir=False,
+        )
     dataset = CalqlDataset(cfg.dataset)
+    sampler = DistributedSampler(dataset)
     dataloader = torch.utils.data.DataLoader(
         dataset,
         batch_size=cfg.batch_size,
-        shuffle=True,
+        shuffle=False,
+        sampler=sampler,
         num_workers=cfg.num_workers,
         pin_memory=True,
+        prefetch_factor=2,
     )
     iter = itertools.cycle(dataloader)
     np.random.seed(cfg.seed)
@@ -88,8 +106,10 @@ def main(cfg: DictConfig):
         cfg.cal_ql.target_entropy = -np.prod((1, action_dim)).item()
 
     sac = Trainer(cfg.cal_ql, policy, qf)
-    sac.to_device(cfg.device)
-    print("compiling sac model...")
+    sac.setup_multi_gpu(local_rank)
+    # sac.to_device(device=device)
+    
+    # print("compiling sac model...")
     # sac.compile(mode=cfg.torch_compile_mode)
 
     viskit_metrics = {}
@@ -114,26 +134,38 @@ def main(cfg: DictConfig):
             metrics.update(train_metrics)
         if expl_metrics is not None:
             metrics.update(expl_metrics)
-
-        wandb_logger.log(metrics)
-        viskit_metrics.update(metrics)
-        logger.record_dict(viskit_metrics)
-        logger.dump_tabular(with_prefix=False, with_timestamp=False)
-        if epoch % cfg.save_every_n_epoch == 0 and epoch != 0:
+        if dist.get_rank() == 0:
+            wandb_logger.log(metrics)
+            viskit_metrics.update(metrics)
+            logger.record_dict(viskit_metrics)
+            logger.dump_tabular(with_prefix=False, with_timestamp=False)
+        if epoch % cfg.save_every_n_epoch == 0 and epoch != 0 and dist.get_rank() == 0:
             ckpt_file_path = os.path.join(ckpt_path, f'checkpoint_{epoch:05d}.pt')
             sac.save_checkpoint(ckpt_file_path)
             
         if epoch >= cfg.train_offline_epochs:
-            print("Finished Training")
+            if dist.get_rank() == 0:
+                print("Finished Training")
             break
 
         with Timer() as train_timer:
-            for _ in tqdm(range(n_train_step_per_epoch)):
+            sampler.set_epoch(epoch)
+            for _ in tqdm(range(n_train_step_per_epoch), desc="Training", disable=(dist.get_rank() != 0)):
                 batch = next(iter)
-                batch = dict_to_device(batch, cfg.device)
+                batch = dict_to_device(batch, device=device)
                 train_metrics = sac.train(
                     batch, use_cql=use_cql, cql_min_q_weight=cql_min_q_weight, enable_calql=enable_calql
                 )
+                def sync_metrics(metrics):
+                    for k, v in metrics.items():
+                        if isinstance(v, torch.Tensor):
+                            v = v.detach()
+                            v_clone = v.clone()
+                            dist.all_reduce(v_clone, op=dist.ReduceOp.SUM)
+                            metrics[k] = (v_clone / dist.get_world_size()).item()
+                    return metrics
+                train_metrics = sync_metrics(train_metrics)
+
             total_grad_steps += n_train_step_per_epoch
         epoch += 1
 

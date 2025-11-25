@@ -38,7 +38,6 @@ cql_min_q_weight: 1.0
 cql_min_q_weight_online: -1.0  # -1 => keep previous value
 enable_calql: true
 
-device: 'cpu'
 torch_compile_mode: "max-autotune"
 
 save_every_n_epoch: 20
