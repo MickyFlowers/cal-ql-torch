@@ -174,6 +174,9 @@ class ResNetPolicy(nn.Module):
         self.log_std_multiplier = Scaler(log_std_multiplier)
         self.log_std_offset = Scaler(log_std_offset)
         self.backbone = timm.create_model(resnet_model, pretrained=True, features_only=True, out_indices=(out_indices,))
+        for module in self.backbone.modules():
+            if isinstance(module, torch.nn.ReLU):
+                module.inplace = False
         if not train_backbone:
             for param in self.backbone.parameters():
                 param.requires_grad = False
@@ -264,6 +267,9 @@ class ResNetQFunction(nn.Module):
         self.observation_dim = observation_dim
         self.action_dim = action_dim
         self.backbone = timm.create_model(resnet_model, pretrained=True, features_only=True, out_indices=(out_indices,))
+        for module in self.backbone.modules():
+            if isinstance(module, torch.nn.ReLU):
+                module.inplace = False
         if not train_backbone:
             for param in self.backbone.parameters():
                 param.requires_grad = False

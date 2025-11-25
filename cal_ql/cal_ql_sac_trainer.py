@@ -1,4 +1,6 @@
+import logging
 import os
+import time
 
 import numpy as np
 import torch
@@ -168,6 +170,7 @@ class Trainer(object):
                 qf_loss = qf1_loss + qf2_loss + cql_min_qf1_loss + cql_min_qf2_loss
             else:
                 qf_loss = qf1_loss + qf2_loss
+
         if self.config.cql_lagrange and use_cql:
             self.optimizers["log_alpha_prime"].zero_grad()
             self.scaler.scale(alpha_prime_loss).backward(retain_graph=True)
@@ -186,7 +189,6 @@ class Trainer(object):
         self.scaler.scale(qf_loss).backward()
         self.scaler.step(self.optimizers["qf"])
         self.scaler.update()
-
         if self._total_steps % self.config.target_update_interval == 0:
             with torch.no_grad():
                 for target_param, param in zip(self.qf["target_qf1"].parameters(), self.qf["qf1"].parameters()):
@@ -273,13 +275,10 @@ class Trainer(object):
         torch.cuda.set_device(local_rank)
         device = torch.device(f"cuda:{local_rank}")
         self.to_device(device)
-        self.policy = nn.SyncBatchNorm.convert_sync_batchnorm(self.policy)
-        self.qf['qf1'] = nn.SyncBatchNorm.convert_sync_batchnorm(self.qf['qf1'])
-        self.qf['qf2'] = nn.SyncBatchNorm.convert_sync_batchnorm(self.qf['qf2'])
 
-        self.policy = DDP(self.policy, device_ids=[local_rank], output_device=local_rank)
-        self.qf['qf1'] = DDP(self.qf['qf1'], device_ids=[local_rank], output_device=local_rank)
-        self.qf['qf2'] = DDP(self.qf['qf2'], device_ids=[local_rank], output_device=local_rank)
+        self.policy = DDP(self.policy, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
+        self.qf['qf1'] = DDP(self.qf['qf1'], device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
+        self.qf['qf2'] = DDP(self.qf['qf2'], device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
 
         self.optimizers["policy"] = torch.optim.Adam(self.policy.parameters(), lr=self.config.policy_lr)
         self.optimizers["qf"] = torch.optim.Adam(
