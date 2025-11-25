@@ -50,7 +50,7 @@ class UrEnv(gym.Env):
             rospy.init_node('ur_env_node', anonymous=True)
             
         rospy.Subscriber(config.ft_sensor_topic, WrenchStamped, self._ft_callback, queue_size=10)
-        rospy.Subscriber(config.camera_topic, CompressedImage, self._image_callback, queue_size=1)
+        rospy.Subscriber(config.camera_topic, CompressedImage, self._image_callback, queue_size=10)
         self.timer = rospy.Timer(rospy.Duration(1.0 / config.ctrl_freq), self._control_loop)
         self._spin_thread = threading.Thread(target=self._spin, daemon=True)
         self._spin_thread.start()

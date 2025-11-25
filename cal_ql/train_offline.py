@@ -1,10 +1,13 @@
 import copy
 import itertools
+import os
+import time
 
 import hydra
 import numpy as np
 import torch
 from omegaconf import DictConfig, OmegaConf
+from tqdm import tqdm
 
 from cal_ql.cal_ql_sac_trainer import Trainer
 from data.dataset import CalqlDataset
@@ -12,7 +15,7 @@ from model.model import ResNetPolicy, ResNetQFunction
 from utils.logger import WandBLogger
 from utils.utils import Timer
 from viskit.logging import logger, setup_logger
-from tqdm import tqdm
+
 
 def dict_to_device(batch, device):
     for k, v in batch.items():
@@ -99,6 +102,9 @@ def main(cfg: DictConfig):
     epoch = 0
     train_metrics = None
     expl_metrics = None
+    if cfg.save_every_n_epoch > 0:
+        ckpt_path = os.path.join(cfg.ckpt_path, f'{cfg.logging.prefix}_{time.strftime("%Y%m%d_%H%M%S")}')
+        os.makedirs(ckpt_path, exist_ok=True)
     while True:
         metrics = {"epoch": epoch}
         metrics["grad_steps"] = total_grad_steps
@@ -113,7 +119,10 @@ def main(cfg: DictConfig):
         viskit_metrics.update(metrics)
         logger.record_dict(viskit_metrics)
         logger.dump_tabular(with_prefix=False, with_timestamp=False)
-
+        if epoch % cfg.save_every_n_epoch == 0 and epoch != 0:
+            ckpt_file_path = os.path.join(ckpt_path, f'checkpoint_{epoch:05d}.pt')
+            sac.save_checkpoint(ckpt_file_path)
+            
         if epoch >= cfg.train_offline_epochs:
             print("Finished Training")
             break

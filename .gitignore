@@ -7,3 +7,7 @@ outputs/
 .vscode/
 **/wandb_config.yaml
 dataset/
+checkpoints/
+
+**.log
+logs/

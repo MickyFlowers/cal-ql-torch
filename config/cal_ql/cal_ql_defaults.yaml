@@ -16,4 +16,4 @@ cql_max_target_backup: true
 cql_clip_diff_min: -.inf
 cql_clip_diff_max: .inf
 
-target_update_interval: 1
+target_update_interval: 10

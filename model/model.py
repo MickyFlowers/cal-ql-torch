@@ -3,9 +3,6 @@ import timm
 import torch
 import torch.nn as nn
 from torch.distributions import Normal
-from torch.distributions.transformed_distribution import \
-    TransformedDistribution
-from torch.distributions.transforms import TanhTransform
 
 
 def extend_and_repeat(tensor, dim, repeat):
@@ -107,8 +104,12 @@ class TanhGaussianPolicy(nn.Module):
         log_std = self.log_std_multiplier() * log_std + self.log_std_offset()
         log_std = torch.clamp(log_std, -20.0, 2.0)
         std = torch.exp(log_std)
-        dist = TransformedDistribution(Normal(mean, std), TanhTransform(cache_size=1))
-        return torch.sum(dist.log_prob(actions), dim=-1)
+        
+        dist = Normal(mean, std)
+        pre_tanh_actions = torch.log((1 + actions) / (1 - actions)) / 2
+        log_prob = dist.log_prob(pre_tanh_actions).sum(dim=-1)
+        log_prob -= (2 * (np.log(2) - pre_tanh_actions - nn.functional.softplus(-2 * pre_tanh_actions))).sum(dim=-1)
+        return log_prob
 
     def forward(self, observations, deterministic=False, repeat=None):
         # observations: [batch, obs_dim]
@@ -119,13 +120,14 @@ class TanhGaussianPolicy(nn.Module):
         log_std = self.log_std_multiplier() * log_std + self.log_std_offset()
         log_std = torch.clamp(log_std, -20.0, 2.0)
         std = torch.exp(log_std)
-        dist = TransformedDistribution(Normal(mean, std), TanhTransform(cache_size=1))
+        dist = Normal(mean, std)
         if deterministic:
-            samples = torch.tanh(mean)
+            pre_tanh_actions = mean
         else:
-            samples = dist.rsample()
-        log_prob = torch.sum(dist.log_prob(samples), dim=-1)
-        return samples, log_prob
+            pre_tanh_actions = dist.rsample()
+        log_prob = torch.sum(dist.log_prob(pre_tanh_actions), dim=-1)
+        log_prob -= (2 * (np.log(2) - pre_tanh_actions - nn.functional.softplus(-2 * pre_tanh_actions))).sum(dim=-1)
+        return torch.tanh(pre_tanh_actions), log_prob
 
 
 class SamplerPolicy(object):
@@ -214,13 +216,14 @@ class ResNetPolicy(nn.Module):
         log_std = self.log_std_multiplier() * log_std + self.log_std_offset()
         log_std = torch.clamp(log_std, -20.0, 2.0)
         std = torch.exp(log_std)
-        dist = TransformedDistribution(Normal(mean, std), TanhTransform(cache_size=1))
+        dist = Normal(mean, std)
         if deterministic:
-            samples = torch.tanh(mean)
+            pre_tanh_actions = mean
         else:
-            samples = dist.rsample()
-        log_prob = torch.sum(dist.log_prob(samples), dim=-1)
-        return samples, log_prob
+            pre_tanh_actions = dist.rsample()
+        log_prob = torch.sum(dist.log_prob(pre_tanh_actions), dim=-1)
+        log_prob -= (2 * (np.log(2) - pre_tanh_actions - nn.functional.softplus(-2 * pre_tanh_actions))).sum(dim=-1)
+        return torch.tanh(pre_tanh_actions), log_prob
 
     def log_prob(self, observations, images, actions):
         image_ft_map = self.backbone(images)[0]
@@ -235,9 +238,12 @@ class ResNetPolicy(nn.Module):
         log_std = self.log_std_multiplier() * log_std + self.log_std_offset()
         log_std = torch.clamp(log_std, -20.0, 2.0)
         std = torch.exp(log_std)
-        dist = TransformedDistribution(Normal(mean, std), TanhTransform(cache_size=1))
+        dist = Normal(mean, std)
+        pre_tanh_actions = torch.log((1 + actions) / (1 - actions)) / 2
+        log_prob = dist.log_prob(pre_tanh_actions).sum(dim=-1)
+        log_prob -= (2 * (np.log(2) - pre_tanh_actions - nn.functional.softplus(-2 * pre_tanh_actions))).sum(dim=-1)
 
-        return torch.sum(dist.log_prob(actions), dim=-1)
+        return log_prob
 
 class ResNetQFunction(nn.Module):
     def __init__(

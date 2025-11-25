@@ -1,3 +1,5 @@
+import os
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -40,7 +42,7 @@ class Trainer(object):
         metrics = self._train_step(batch, use_cql=use_cql, cql_min_q_weight=cql_min_q_weight, enable_calql=enable_calql)
         return metrics
     
-    @torch.compile(options={"triton.cudagraphs": True}, fullgraph=True)
+
     def _train_step(self, batch, use_cql=True, cql_min_q_weight=5.0, enable_calql=False):
         observations = batch["observations"]['proprio'].to(self.device)
         images = batch["observations"]['image'].to(self.device)
@@ -260,3 +262,20 @@ class Trainer(object):
     @property
     def total_steps(self):
         return self._total_steps
+    
+    
+    def save_checkpoint(self, filepath):
+        checkpoint = {
+            'policy_state_dict': self.policy.state_dict(),
+            'qf1_state_dict': self.qf['qf1'].state_dict(),
+            'qf2_state_dict': self.qf['qf2'].state_dict(),
+            'target_qf1_state_dict': self.qf['target_qf1'].state_dict(),
+            'target_qf2_state_dict': self.qf['target_qf2'].state_dict(),
+            'optimizers_state_dict': {k: v.state_dict() for k, v in self.optimizers.items()},
+            'total_steps': self._total_steps,
+        }
+        if self.config.use_automatic_entropy_tuning:
+            checkpoint['log_alpha_state_dict'] = self.log_alpha.state_dict()
+        if self.config.cql_lagrange:
+            checkpoint['log_alpha_prime_state_dict'] = self.log_alpha_prime.state_dict()
+        torch.save(checkpoint, filepath)
