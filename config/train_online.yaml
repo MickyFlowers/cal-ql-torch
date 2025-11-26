@@ -43,3 +43,5 @@ torch_compile_mode: "max-autotune"
 save_every_n_epoch: 20
 ckpt_path: ./checkpoints
 load_ckpt_path: ./checkpoints/ckpt_epoch_300.pth
+
+device: cuda:1
