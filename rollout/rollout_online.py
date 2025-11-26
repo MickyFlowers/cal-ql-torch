@@ -40,10 +40,7 @@ def denormalize(data, statistics, norm_type, epsilon=1e-8):
         data = data * data_std + data_mean
     return data
 
-    
-    
-
-@hydra.main(config_path="../config", config_name="rollout", version_base=None)
+@hydra.main(config_path="../config", config_name="rollout_online", version_base=None)
 def main(config):
     env = gym.make("ur_env_v0", config=config.env)
     try:
@@ -58,17 +55,17 @@ def main(config):
         ])
         first_flag = True
         remote_transfer = RemoteTransfer(
-            config.remote.host_name,
-            config.remote.port,
-            config.remote.user_name,
-            key_filepath=config.remote.key_filepath,
+            config.host_name,
+            config.port,
+            config.user_name,
+            key_filepath=config.key_filepath,
         )
         episode_files = remote_transfer.list_remote_dir(config.remote_data_dir)
         episode_files = [f for f in episode_files if f.endswith('.hdf5')]
         num_episodes = len(episode_files)
         # download offline ckpt from remote server
         local_offline_ckpt_file = os.path.join(config.local_ckpt_dir, "offline_ckpt.pth")
-        if not os.path.exists(config.local_ckpt_dir):
+        if not os.path.exists(local_offline_ckpt_file):
             remote_transfer.download_file(
                 config.remote_offline_ckpt, local_offline_ckpt_file, overwrite=True
             )
@@ -83,7 +80,7 @@ def main(config):
             config.orthogonal_init,
             config.policy_log_std_multiplier,
             config.policy_log_std_offset,
-            train_backbone=config.train_policy_backbone,
+            train_backbone=False,
         )
         policy.to(device=config.device)
         policy.load_state_dict(policy_state_dict)
@@ -114,6 +111,7 @@ def main(config):
                             local_online_ckpt_file = os.path.join(
                                 config.local_ckpt_dir, "online_ckpt.pth"
                             )
+                            print(f"Downloading online ckpt {online_ckpt_file} ...")
                             remote_transfer.download_file(
                                 os.path.join(config.remote_online_ckpt_dir, online_ckpt_file),
                                 local_online_ckpt_file,
@@ -134,12 +132,13 @@ def main(config):
                 proprio = normalize(proprio, statistics['proprio'], config.proprio_norm_type)
                 proprio_tensor = torch.tensor(proprio, dtype=torch.float32).unsqueeze(0).to(device=config.device)
                 image_bytes = observation["img_obs"]
-                image = np_buffer_to_pil_image(image_bytes)
+                image = np_buffer_to_pil_image(np.frombuffer(image_bytes, dtype=np.uint8))
                 image = image_transform(image).unsqueeze(0).to(device=config.device)
                 with torch.no_grad():
-                    action, log_prob = policy(image, proprio_tensor)
+                    action, log_prob = policy(proprio_tensor, image, deterministic=True)
                     action = action.squeeze(0).cpu().numpy()
                 action = denormalize(action, statistics['action'], config.action_norm_type)
+                # debug
                 # step the environment
                 next_observations, reward, done, info = env.step(action)
                 # record data

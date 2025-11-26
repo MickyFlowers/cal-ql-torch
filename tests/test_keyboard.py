@@ -14,6 +14,6 @@ try:
         print("Running...")
         elapsed_time = time.perf_counter() - start_time
         print(f"Loop time: {elapsed_time:.4f} seconds")
-        time.sleep(0.1)
+        time.sleep(0.01)
 finally:
     kb.restore()

@@ -113,11 +113,12 @@ class UrEnv(gym.Env):
         reward = 0.0
         done = False
         info = {"info": "progressing"}
-        if self.keyboard_reader.is_pressed('s'):
+        key = self.keyboard_reader.get_key()
+        if key == 's':
             reward = 1.0
             done = True
             info["info"] == "success"
-        elif self.keyboard_reader.is_pressed('q'):
+        elif key == 'd':
             done = True
             info["info"] = "quit"
         if self._env_steps >= self.config.max_env_steps - 1:
@@ -166,6 +167,13 @@ class UrEnv(gym.Env):
         self.ur_robot.moveToPose(reset_pose, asynchronous=False)
         rospy.Rate(1).sleep()
         self.wait_for_obs()
+        print("waiting for manully start...")
+        print("Press[y] to start data collection")
+        while True:
+            key = self.keyboard_reader.get_key()
+            rospy.Rate(1).sleep()
+            if key == 'y':
+                break
         print("Environment reset done.")
         observations = self.get_observation()
         self.running = True
