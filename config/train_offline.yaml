@@ -35,10 +35,10 @@ train_offline_epochs: 300
 # CQL related toggles
 use_cql: true
 cql_min_q_weight: 1.0
-cql_min_q_weight_online: -1.0  # -1 => keep previous value
 enable_calql: true
 
 torch_compile_mode: "max-autotune"
 
 save_every_n_epoch: 20
 ckpt_path: ./checkpoints
+load_ckpt_path: ""

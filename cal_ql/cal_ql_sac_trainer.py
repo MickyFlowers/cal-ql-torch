@@ -300,8 +300,8 @@ class Trainer(object):
         self.qf['target_qf1'].load_state_dict(checkpoint['target_qf1_state_dict'])
         self.qf['target_qf2'].load_state_dict(checkpoint['target_qf2_state_dict'])
         for k, v in self.optimizers.items():
-            if k + '_state_dict' in checkpoint['optimizers_state_dict']:
-                v.load_state_dict(checkpoint['optimizers_state_dict'][k + '_state_dict'])
+            if k in checkpoint['optimizers_state_dict']:
+                v.load_state_dict(checkpoint['optimizers_state_dict'][k])
         self._total_steps = checkpoint.get('total_steps', 0)
         if self.config.use_automatic_entropy_tuning and 'log_alpha_state_dict' in checkpoint:
             self.log_alpha.load_state_dict(checkpoint['log_alpha_state_dict'])
