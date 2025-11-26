@@ -117,7 +117,9 @@ class UrEnv(gym.Env):
             reward = 1.0
             done = True
             info["info"] == "success"
-            
+        elif self.keyboard_reader.is_pressed('q'):
+            done = True
+            info["info"] = "quit"
         if self._env_steps >= self.config.max_env_steps - 1:
             done = True
             info["info"] = "max_steps_reached"

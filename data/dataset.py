@@ -88,7 +88,7 @@ class CalqlDataset(Dataset):
         self.meta = self._parser_meta(self.meta_file)
         self.image_transform = transforms.Compose([
             transforms.Resize((config.image_resize, config.image_resize)),
-            transforms.CenterCrop(config.image_size),
+            transforms.RandomCrop(config.image_size),
             transforms.ToTensor(),
             transforms.Normalize(                     
                 mean=[0.485, 0.456, 0.406],

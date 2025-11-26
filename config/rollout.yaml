@@ -1,0 +1,21 @@
+defaults:
+  - env: env
+
+# teach_mode: true
+# num_data: 100
+save_path: ./dataset/online_rl_data_11_26_15
+port: null
+host_name: null
+user_name: null
+key_filepath: null
+remote_data_dir: null
+remote_online_ckpt_dir: null
+remote_offline_ckpt: null
+local_ckpt_dir: ./checkpoints
+device: cuda:0
+proprio_norm_type: max_min
+action_norm_type: max_min
+dt: 0.01
+image_resize: 256
+image_size: 224
+ckpt_download_interval: 50
