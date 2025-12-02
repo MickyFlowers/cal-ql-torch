@@ -3,9 +3,10 @@ import threading
 import gym
 import numpy as np
 import rospy
-from geometry_msgs.msg import WrenchStamped
+from geometry_msgs.msg import Twist, WrenchStamped
 from omegaconf import OmegaConf
 from sensor_msgs.msg import CompressedImage
+from std_msgs.msg import Int8MultiArray
 from xlib.algo.controller import AdmittanceController
 from xlib.algo.utils.image_utils import compressed_msg_to_bytes
 from xlib.algo.utils.random import sample_disturbance
@@ -20,7 +21,6 @@ class UrEnv(gym.Env):
         self.config = config
         # ur_robot init
         self.ur_robot = UR(config.ip)
-        start_pose = self.ur_robot.tcp_pose
         # init variables    
         self.ft_value = None
         self.img_obs = None
@@ -51,10 +51,38 @@ class UrEnv(gym.Env):
             
         rospy.Subscriber(config.ft_sensor_topic, WrenchStamped, self._ft_callback, queue_size=10)
         rospy.Subscriber(config.camera_topic, CompressedImage, self._image_callback, queue_size=10)
+        rospy.Subscriber(config.spacemouse_twist_topic, Twist, self._spacemouse_callback, queue_size=10)
+        rospy.Subscriber(config.spacemouse_buttons_topic, Int8MultiArray, self._spacemouse_buttons_callback, queue_size=10)
+        self.space_mouse_twist = None
+        
+        self.enable_teleop = False
         self.timer = rospy.Timer(rospy.Duration(1.0 / config.ctrl_freq), self._control_loop)
         self._spin_thread = threading.Thread(target=self._spin, daemon=True)
         self._spin_thread.start()
-        
+    def _spacemouse_callback(self, twist_msg: Twist):
+        self.space_mouse_twist = np.array([
+            twist_msg.linear.x,
+            twist_msg.linear.y,
+            twist_msg.linear.z,
+            twist_msg.angular.x,
+            twist_msg.angular.y,
+            twist_msg.angular.z,
+        ])
+    def _spacemouse_buttons_callback(self, buttons_msg: Int8MultiArray):
+        buttons = buttons_msg.data
+        if self.enable_teleop:
+            if buttons[1] == 1:
+                self.enable_teleop = False
+        else:
+            if buttons[0] == 1:
+                self.enable_teleop = True
+    
+    def get_space_mouse_state(self):
+        return self.space_mouse_twist, self.enable_teleop
+    
+    def get_target_pose(self):
+        return self.target_pose.copy()
+    
     def _spin(self):
         rospy.spin()
     
@@ -77,7 +105,7 @@ class UrEnv(gym.Env):
         self.tcp_obs = self.ur_robot.tcp_pose
         self.jnt_obs = self.ur_robot.joint_position
         
-            
+    
     @property
     def env_steps(self):
         return self._env_steps
@@ -87,6 +115,8 @@ class UrEnv(gym.Env):
         if (
             self.ft_value is not None
             and self.img_obs is not None
+            and self.space_mouse_twist is not None
+
         ):
             return True
         else:
@@ -168,7 +198,7 @@ class UrEnv(gym.Env):
         rospy.Rate(1).sleep()
         self.wait_for_obs()
         print("waiting for manully start...")
-        print("Press[y] to start data collection")
+        print("Press[y] continue")
         while True:
             key = self.keyboard_reader.get_key()
             rospy.Rate(1).sleep()

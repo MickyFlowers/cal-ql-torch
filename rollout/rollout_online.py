@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import torchvision.transforms as transforms
 import yaml
+from xlib.algo.utils.transforms import applyDeltaPose6d
 from xlib.algo.utils.image_utils import np_buffer_to_pil_image
 from xlib.data.hdf5_saver import HDF5BlockSaver
 from xlib.data.remote_transfer import RemoteTransfer
@@ -126,21 +127,28 @@ def main(config):
                             policy.eval()
                             print(f"Load online ckpt: {online_ckpt_file}")
             while True:
-                jnt_obs = observation["jnt_obs"]
-                tcp_obs = observation["tcp_obs"]
-                proprio = np.concatenate([jnt_obs, tcp_obs], axis=-1)
-                proprio = normalize(proprio, statistics['proprio'], config.proprio_norm_type)
-                proprio_tensor = torch.tensor(proprio, dtype=torch.float32).unsqueeze(0).to(device=config.device)
-                image_bytes = observation["img_obs"]
-                image = np_buffer_to_pil_image(np.frombuffer(image_bytes, dtype=np.uint8))
-                image = image_transform(image).unsqueeze(0).to(device=config.device)
-                with torch.no_grad():
-                    action, log_prob = policy(proprio_tensor, image, deterministic=True)
-                    action = action.squeeze(0).cpu().numpy()
-                action = denormalize(action, statistics['action'], config.action_norm_type)
-                # debug
-                # step the environment
-                next_observations, reward, done, info = env.step(action)
+                space_mouse_twist, enable_teleop = env.get_space_mouse_state()
+                if enable_teleop:
+                    target_pose = env.get_target_pose()
+                    delta_pose = space_mouse_twist * 0.01 * config.env.teleop_twist_scale  # Scale down the twist for teleoperation
+                    next_pose = applyDeltaPose6d(target_pose, delta_pose)
+                    next_observations, reward, done, info = env.step(next_pose)
+                else:
+                    jnt_obs = observation["jnt_obs"]
+                    tcp_obs = observation["tcp_obs"]
+                    proprio = np.concatenate([jnt_obs, tcp_obs], axis=-1)
+                    proprio = normalize(proprio, statistics['proprio'], config.proprio_norm_type)
+                    proprio_tensor = torch.tensor(proprio, dtype=torch.float32).unsqueeze(0).to(device=config.device)
+                    image_bytes = observation["img_obs"]
+                    image = np_buffer_to_pil_image(np.frombuffer(image_bytes, dtype=np.uint8))
+                    image = image_transform(image).unsqueeze(0).to(device=config.device)
+                    with torch.no_grad():
+                        action, log_prob = policy(proprio_tensor, image, deterministic=True)
+                        action = action.squeeze(0).cpu().numpy()
+                    action = denormalize(action, statistics['action'], config.action_norm_type)
+                    # debug
+                    # step the environment
+                    next_observations, reward, done, info = env.step(action)
                 # record data
                 record_data = {
                     "observations": observation,
