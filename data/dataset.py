@@ -145,6 +145,11 @@ class CalqlDataset(Dataset):
             next_images = next_observations['img_obs']
             rewards = f['rewards'][:]
             rewards = rewards * self.config.reward_scale + self.config.reward_bias
+            if rewards[-1] == 1.0:
+                success = True
+            else:
+                success = False
+
             dones = f['dones']
         
             episode_length = jnt_obs.shape[0]
@@ -188,6 +193,7 @@ class CalqlDataset(Dataset):
             'reward': np.array(reward).astype(np.float32),
             'done': np.array(done).astype(np.float32),
             'mc_return': np.array(mc_return).astype(np.float32),
+            'success': np.array(success).astype(np.float32),
         }
         return sample
 

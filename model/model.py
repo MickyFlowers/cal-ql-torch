@@ -29,6 +29,23 @@ def multiple_action_q_function(forward):
 
     return wrapped
 
+class MLPBlock(nn.Module):
+    def __init__(self, in_dim, out_dim, orthogonal_init=False):
+        super().__init__()
+        self.linear = nn.Linear(in_dim, out_dim)
+        self.norm = nn.LayerNorm(in_dim)
+        self.activation = nn.GELU()
+        if orthogonal_init:
+            nn.init.orthogonal_(self.linear.weight, gain=np.sqrt(2))
+            nn.init.constant_(self.linear.bias, 0.0)
+
+
+    def forward(self, x):
+        x = self.norm(x)
+        x = self.linear(x)
+        x = self.activation(x)
+        out = x
+        return out
 
 class FullyConnectedNetwork(nn.Module):
     def __init__(self, input_dim, output_dim, arch="256-256", orthogonal_init=False):
@@ -37,12 +54,8 @@ class FullyConnectedNetwork(nn.Module):
         layers = []
         last_dim = input_dim
         for h in hidden_sizes:
-            linear = nn.Linear(last_dim, h)
-            if orthogonal_init:
-                nn.init.orthogonal_(linear.weight, gain=np.sqrt(2))
-                nn.init.constant_(linear.bias, 0.0)
-            layers.append(linear)
-            layers.append(nn.ReLU())
+            block = MLPBlock(last_dim, h, orthogonal_init)
+            layers.append(block)
             last_dim = h
         out_linear = nn.Linear(last_dim, output_dim)
         if orthogonal_init:
@@ -177,6 +190,7 @@ class ResNetPolicy(nn.Module):
         for module in self.backbone.modules():
             if isinstance(module, torch.nn.ReLU):
                 module.inplace = False
+        self.train_backbone = train_backbone
         if not train_backbone:
             for param in self.backbone.parameters():
                 param.requires_grad = False
@@ -234,7 +248,7 @@ class ResNetPolicy(nn.Module):
         obs_ft = self.obs_proj(observations)
         ft = torch.cat([obs_ft, image_ft], dim=-1)
         
-        base_out = self.base_network(ft)
+        base_out = self.out_proj(ft)
         if actions.dim() == 3:
             base_out = base_out.reshape(-1, base_out.shape[-1])
         mean, log_std = torch.chunk(base_out, 2, dim=-1)
@@ -247,6 +261,17 @@ class ResNetPolicy(nn.Module):
         log_prob -= (2 * (np.log(2) - pre_tanh_actions - nn.functional.softplus(-2 * pre_tanh_actions))).sum(dim=-1)
 
         return log_prob
+
+    def freeze(self):
+        for param in self.parameters():
+            param.requires_grad = False
+    
+    def unfreeze(self):
+        for param in self.parameters():
+            param.requires_grad = True
+        if not self.train_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
 
 class ResNetQFunction(nn.Module):
     def __init__(

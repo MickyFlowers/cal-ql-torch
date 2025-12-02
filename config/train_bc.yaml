@@ -1,5 +1,4 @@
 defaults:
-  - cal_ql: cal_ql_defaults
   - logging: logging_defaults
   - dataset: dataset_defaults
 
@@ -23,28 +22,14 @@ policy_log_std_multiplier: 1.0
 policy_log_std_offset: -1.0
 train_policy_backbone: false
 
-q_obs_proj_arch: '256-256-256-256'
-q_out_proj_arch: '256-256-256-256'
-train_q_backbone: false
 
-
-# Offline pretraining / online finetuning schedule
-train_offline_epochs: 100
-
-# CQL related toggles
-use_cql: true
-cql_min_q_weight: 0.5
-enable_calql: true
+learning_rate: 3e-4
+train_bc_epochs: 100
 
 torch_compile_mode: "max-autotune"
 
 save_every_n_epoch: 20
 ckpt_path: ./checkpoints
 load_ckpt_path: ""
-load_policy_ckpt_path: ""
-
-
 
 device: cuda:0
-
-freeze_policy_epochs: 50

@@ -32,7 +32,7 @@ def dict_to_device(batch, device):
 
 @hydra.main(config_path="../config", config_name="train_online", version_base=None)
 def main(cfg: DictConfig):
-    device = torch.device("cuda:0")
+    device = torch.device(cfg.device)
     variant = OmegaConf.to_container(cfg, resolve=True)
     wandb_logger = WandBLogger(config=cfg.logging, variant=variant)
     setup_logger(
@@ -102,7 +102,7 @@ def main(cfg: DictConfig):
     # sac.compile(mode=cfg.torch_compile_mode)
 
     viskit_metrics = {}
-    n_train_step_per_epoch = cfg.n_train_step_per_epoch_offline
+    # n_train_step_per_epoch = cfg.n_train_step_per_epoch_offline
     cql_min_q_weight = cfg.cql_min_q_weight
     enable_calql = cfg.enable_calql
     use_cql = cfg.use_cql
@@ -144,7 +144,7 @@ def main(cfg: DictConfig):
         )
         data_iter = data_iter_fn(dataloader)
         with Timer() as train_timer:
-            for _ in tqdm(range(n_train_step_per_epoch), desc="Training"):
+            for batch in tqdm(dataloader, desc="Training"):
                 batch = next(data_iter)
                 batch = dict_to_device(batch, device=device)
                 train_metrics = sac.train(
@@ -158,7 +158,7 @@ def main(cfg: DictConfig):
                 train_metrics = post_process(train_metrics)
                 
 
-            total_grad_steps += n_train_step_per_epoch
+            total_grad_steps += len(dataloader)
         epoch += 1
 
 

@@ -7,10 +7,10 @@ nohup python -m cal_ql.train_offline_single_gpu \
     logging.online=true \
     torch_compile_mode='default' \
     logging.prefix='offline' \
-    cal_ql.qf_lr=3e-6 \
-    cal_ql.policy_lr=1e-6 \
+    cal_ql.qf_lr=3e-4 \
+    cal_ql.policy_lr=1e-4 \
     batch_size=128 \
     num_workers=32 \
     device=cuda:1 \
-    train_offline_epochs=200 \
-    > logs/train_offline_single_gpu.log 2>&1 &
+    train_offline_epochs=500 \
+    > logs/train_offline_single_gpu_high_lr.log 2>&1 &

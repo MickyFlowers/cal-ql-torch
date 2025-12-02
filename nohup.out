@@ -1,0 +1,211 @@
+wandb: WARNING `start_method` is deprecated and will be removed in a future version of wandb. This setting is currently non-functional and safely ignored.
+wandb: Currently logged in as: cyx010402 (cyxovo) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: WARNING Using a boolean value for 'reinit' is deprecated. Use 'return_previous' or 'finish_previous' instead.
+wandb: setting up run d7f0adef84264aea887be3038da204af
+wandb: Tracking run with wandb version 0.22.3
+wandb: Run data is saved locally in ./experiment_output/wandb/run-20251127_074541-d7f0adef84264aea887be3038da204af
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run d7f0adef84264aea887be3038da204af
+wandb: ⭐️ View project at https://wandb.ai/cyxovo/offline--sac
+wandb: 🚀 View run at https://wandb.ai/cyxovo/offline--sac/runs/d7f0adef84264aea887be3038da204af
+2025-11-27 07:45:42.896738 CST | Variant:
+2025-11-27 07:45:42.897236 CST | {
+  "cal_ql": {
+    "discount": 0.999,
+    "alpha_multiplier": 1.0,
+    "use_automatic_entropy_tuning": true,
+    "backup_entropy": false,
+    "target_entropy": 0.0,
+    "policy_lr": 1e-06,
+    "qf_lr": 5e-06,
+    "optimizer_type": "adam",
+    "soft_target_update_rate": 0.005,
+    "cql_n_actions": 10,
+    "cql_importance_sample": true,
+    "cql_lagrange": true,
+    "cql_target_action_gap": 0.8,
+    "cql_temp": 1.0,
+    "cql_max_target_backup": true,
+    "cql_clip_diff_min": -Infinity,
+    "cql_clip_diff_max": Infinity,
+    "target_update_interval": 1
+  },
+  "logging": {
+    "wandb_config": {
+      "wandb_api_key": "4f65ba56f95b9233f40612f8c8195aeaf44d30dc",
+      "wandb_user_email": "cyx010402@gmail.com",
+      "wandb_username": "cyxovo"
+    },
+    "online": true,
+    "prefix": "offline",
+    "project": "sac",
+    "output_dir": "./experiment_output",
+    "random_delay": 0.0,
+    "experiment_id": "",
+    "anonymous": null,
+    "notes": null,
+    "entity": null
+  },
+  "dataset": {
+    "root_path": "/mnt/pfs/datasets/offline_rl_data_11_17_20/",
+    "image_resize": 256,
+    "image_size": 224,
+    "norm_type": "max_min",
+    "reward_scale": 5.0,
+    "reward_bias": -0.02,
+    "discount": 0.999
+  },
+  "observation_dim": 12,
+  "action_dim": 6,
+  "seed": 42,
+  "save_model": false,
+  "batch_size": 128,
+  "num_workers": 32,
+  "hidden_dim": 256,
+  "orthogonal_init": false,
+  "policy_obs_proj_arch": "256-256",
+  "policy_out_proj_arch": "256-256",
+  "policy_log_std_multiplier": 1.0,
+  "policy_log_std_offset": -1.0,
+  "train_policy_backbone": false,
+  "q_obs_proj_arch": "256-256",
+  "q_out_proj_arch": "256-256-256-256",
+  "train_q_backbone": false,
+  "train_offline_epochs": 200,
+  "use_cql": true,
+  "cql_min_q_weight": 1.0,
+  "enable_calql": true,
+  "torch_compile_mode": "default",
+  "save_every_n_epoch": 20,
+  "ckpt_path": "./checkpoints",
+  "load_ckpt_path": "/root/workspace/cal-ql-torch/checkpoints/offline_20251127_012520/checkpoint_00100.pt",
+  "device": "cuda:1"
+}
+Saved meta information to /mnt/pfs/datasets/offline_rl_data_11_17_20/meta.yaml
+[2025-11-27 07:45:43,103][timm.models._builder][INFO] - Loading pretrained weights from Hugging Face hub (timm/resnet18.a1_in1k)
+[2025-11-27 07:45:43,492][timm.models._hub][INFO] - [timm/resnet18.a1_in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+[2025-11-27 07:45:43,510][timm.models._builder][INFO] - Missing keys (fc.weight, fc.bias) discovered while loading pretrained weights. This is expected if model is being adapted.
+[2025-11-27 07:45:43,649][timm.models._builder][INFO] - Loading pretrained weights from Hugging Face hub (timm/resnet18.a1_in1k)
+[2025-11-27 07:45:43,918][timm.models._hub][INFO] - [timm/resnet18.a1_in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+[2025-11-27 07:45:43,923][timm.models._builder][INFO] - Missing keys (fc.weight, fc.bias) discovered while loading pretrained weights. This is expected if model is being adapted.
+[2025-11-27 07:45:44,054][timm.models._builder][INFO] - Loading pretrained weights from Hugging Face hub (timm/resnet18.a1_in1k)
+[2025-11-27 07:45:44,318][timm.models._hub][INFO] - [timm/resnet18.a1_in1k] Safe alternative available for 'pytorch_model.bin' (as 'model.safetensors'). Loading weights using safetensors.
+[2025-11-27 07:45:44,324][timm.models._builder][INFO] - Missing keys (fc.weight, fc.bias) discovered while loading pretrained weights. This is expected if model is being adapted.
+[2025-11-27 07:45:44,980][py.warnings][WARNING] - /root/workspace/cal-ql-torch/cal_ql/cal_ql_sac_trainer.py:297: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  checkpoint = torch.load(filepath, map_location=self.device)
+
+Loaded checkpoint from /root/workspace/cal-ql-torch/checkpoints/offline_20251127_012520/checkpoint_00100.pt at total steps 38400
+----------  -
+epoch       0
+grad_steps  0
+train_time  0
+----------  -
+Training:   0%|          | 0/384 [00:00<?, ?it/s]Training:   0%|          | 1/384 [00:05<36:37,  5.74s/it]Training:   1%|          | 2/384 [00:08<25:03,  3.94s/it]Training:   1%|          | 3/384 [00:08<14:10,  2.23s/it]Training:   1%|          | 4/384 [00:08<09:18,  1.47s/it]Training:   1%|▏         | 5/384 [00:09<06:24,  1.01s/it]Training:   2%|▏         | 6/384 [00:09<04:51,  1.30it/s]Training:   2%|▏         | 7/384 [00:09<03:53,  1.61it/s]Training:   2%|▏         | 8/384 [00:10<03:15,  1.92it/s]Training:   2%|▏         | 9/384 [00:10<02:38,  2.37it/s]Training:   3%|▎         | 10/384 [00:10<02:23,  2.60it/s]Training:   3%|▎         | 11/384 [00:10<02:14,  2.77it/s]Training:   3%|▎         | 12/384 [00:11<01:58,  3.14it/s]Training:   3%|▎         | 13/384 [00:11<02:00,  3.07it/s]Training:   4%|▎         | 14/384 [00:11<01:49,  3.39it/s]Training:   4%|▍         | 15/384 [00:11<01:34,  3.92it/s]Training:   4%|▍         | 16/384 [00:11<01:24,  4.38it/s]Training:   4%|▍         | 17/384 [00:12<01:16,  4.78it/s]Training:   5%|▍         | 18/384 [00:12<01:11,  5.10it/s]Training:   5%|▍         | 19/384 [00:12<01:07,  5.41it/s]Training:   5%|▌         | 20/384 [00:12<01:04,  5.65it/s]Training:   5%|▌         | 21/384 [00:12<01:02,  5.83it/s]Training:   6%|▌         | 22/384 [00:12<01:00,  5.97it/s]Training:   6%|▌         | 23/384 [00:13<00:59,  6.07it/s]Training:   6%|▋         | 24/384 [00:13<00:58,  6.13it/s]Training:   7%|▋         | 25/384 [00:13<00:58,  6.18it/s]Training:   7%|▋         | 26/384 [00:13<00:57,  6.21it/s]Training:   7%|▋         | 27/384 [00:13<00:57,  6.24it/s]Training:   7%|▋         | 28/384 [00:13<00:56,  6.26it/s]Training:   8%|▊         | 29/384 [00:14<00:56,  6.27it/s]Training:   8%|▊         | 30/384 [00:14<00:56,  6.28it/s]Training:   8%|▊         | 31/384 [00:14<00:56,  6.27it/s]Training:   8%|▊         | 32/384 [00:14<00:56,  6.27it/s]Training:   9%|▊         | 33/384 [00:14<00:57,  6.15it/s]Training:   9%|▉         | 34/384 [00:14<00:56,  6.17it/s]Training:   9%|▉         | 35/384 [00:15<00:56,  6.14it/s]Training:   9%|▉         | 36/384 [00:15<00:56,  6.17it/s]Training:  10%|▉         | 37/384 [00:15<00:56,  6.14it/s]Training:  10%|▉         | 38/384 [00:15<00:56,  6.17it/s]Training:  10%|█         | 39/384 [00:15<00:55,  6.20it/s]Training:  10%|█         | 40/384 [00:15<00:55,  6.19it/s]Training:  11%|█         | 41/384 [00:15<00:55,  6.20it/s]Training:  11%|█         | 42/384 [00:16<00:55,  6.22it/s]Training:  11%|█         | 43/384 [00:16<00:54,  6.22it/s]Training:  11%|█▏        | 44/384 [00:16<00:54,  6.22it/s]Training:  12%|█▏        | 45/384 [00:16<00:54,  6.24it/s]Training:  12%|█▏        | 46/384 [00:16<00:54,  6.25it/s]Training:  12%|█▏        | 47/384 [00:16<00:53,  6.25it/s]Training:  12%|█▎        | 48/384 [00:17<00:53,  6.25it/s]Training:  13%|█▎        | 49/384 [00:17<00:53,  6.25it/s]Training:  13%|█▎        | 50/384 [00:17<00:53,  6.26it/s]Training:  13%|█▎        | 51/384 [00:17<00:53,  6.26it/s]Training:  14%|█▎        | 52/384 [00:17<00:53,  6.26it/s]Training:  14%|█▍        | 53/384 [00:17<00:52,  6.25it/s]Training:  14%|█▍        | 54/384 [00:18<00:53,  6.19it/s]Training:  14%|█▍        | 55/384 [00:18<00:53,  6.21it/s]Training:  15%|█▍        | 56/384 [00:18<00:52,  6.23it/s]Training:  15%|█▍        | 57/384 [00:18<00:52,  6.24it/s]Training:  15%|█▌        | 58/384 [00:18<00:52,  6.23it/s]Training:  15%|█▌        | 59/384 [00:18<00:52,  6.23it/s]Training:  16%|█▌        | 60/384 [00:19<00:51,  6.25it/s]Training:  16%|█▌        | 61/384 [00:19<00:51,  6.25it/s]Training:  16%|█▌        | 62/384 [00:19<00:51,  6.25it/s]Training:  16%|█▋        | 63/384 [00:19<00:51,  6.25it/s]Training:  17%|█▋        | 64/384 [00:19<00:51,  6.26it/s]Training:  17%|█▋        | 65/384 [00:19<00:50,  6.26it/s]Training:  17%|█▋        | 66/384 [00:19<00:50,  6.26it/s]Training:  17%|█▋        | 67/384 [00:20<00:50,  6.25it/s]Training:  18%|█▊        | 68/384 [00:20<00:50,  6.22it/s]Training:  18%|█▊        | 69/384 [00:20<00:50,  6.24it/s]Training:  18%|█▊        | 70/384 [00:20<00:50,  6.24it/s]Training:  18%|█▊        | 71/384 [00:20<00:50,  6.25it/s]Training:  19%|█▉        | 72/384 [00:20<00:49,  6.27it/s]Training:  19%|█▉        | 73/384 [00:21<00:49,  6.27it/s]Training:  19%|█▉        | 74/384 [00:21<00:49,  6.26it/s]Training:  20%|█▉        | 75/384 [00:21<00:49,  6.26it/s]Training:  20%|█▉        | 76/384 [00:21<00:49,  6.25it/s]Training:  20%|██        | 77/384 [00:21<00:49,  6.26it/s]Training:  20%|██        | 78/384 [00:21<00:48,  6.26it/s]Training:  21%|██        | 79/384 [00:22<00:48,  6.27it/s]Training:  21%|██        | 80/384 [00:22<00:48,  6.27it/s]Training:  21%|██        | 81/384 [00:22<00:48,  6.28it/s]Training:  21%|██▏       | 82/384 [00:22<00:48,  6.27it/s]Training:  22%|██▏       | 83/384 [00:22<00:48,  6.26it/s]Training:  22%|██▏       | 84/384 [00:22<00:47,  6.27it/s]Training:  22%|██▏       | 85/384 [00:23<00:47,  6.28it/s]Training:  22%|██▏       | 86/384 [00:23<00:47,  6.26it/s]Training:  23%|██▎       | 87/384 [00:23<00:47,  6.26it/s]Training:  23%|██▎       | 88/384 [00:23<00:47,  6.27it/s]Training:  23%|██▎       | 89/384 [00:23<00:47,  6.26it/s]Training:  23%|██▎       | 90/384 [00:23<00:46,  6.26it/s]Training:  24%|██▎       | 91/384 [00:23<00:46,  6.26it/s]Training:  24%|██▍       | 92/384 [00:24<00:46,  6.27it/s]Training:  24%|██▍       | 93/384 [00:24<00:46,  6.26it/s]Training:  24%|██▍       | 94/384 [00:24<00:46,  6.26it/s]Training:  25%|██▍       | 95/384 [00:24<00:46,  6.27it/s]Training:  25%|██▌       | 96/384 [00:24<00:45,  6.27it/s]Training:  25%|██▌       | 97/384 [00:24<00:45,  6.24it/s]Training:  26%|██▌       | 98/384 [00:25<00:46,  6.19it/s]Training:  26%|██▌       | 99/384 [00:25<00:46,  6.14it/s]Training:  26%|██▌       | 100/384 [00:25<00:46,  6.15it/s]Training:  26%|██▋       | 101/384 [00:25<00:45,  6.15it/s]Training:  27%|██▋       | 102/384 [00:25<00:45,  6.18it/s]Training:  27%|██▋       | 103/384 [00:25<00:45,  6.20it/s]Training:  27%|██▋       | 104/384 [00:26<00:45,  6.16it/s]Training:  27%|██▋       | 105/384 [00:26<00:45,  6.13it/s]Training:  28%|██▊       | 106/384 [00:26<00:45,  6.13it/s]Training:  28%|██▊       | 107/384 [00:26<00:44,  6.16it/s]Training:  28%|██▊       | 108/384 [00:26<00:44,  6.19it/s]Training:  28%|██▊       | 109/384 [00:26<00:44,  6.21it/s]Training:  29%|██▊       | 110/384 [00:27<00:44,  6.17it/s]Training:  29%|██▉       | 111/384 [00:27<00:44,  6.16it/s]Training:  29%|██▉       | 112/384 [00:27<00:44,  6.16it/s]Training:  29%|██▉       | 113/384 [00:27<00:43,  6.19it/s]Training:  30%|██▉       | 114/384 [00:27<00:43,  6.21it/s]Exception ignored in: <function _MultiProcessingDataLoaderIter.__del__ at 0x7fc4d553d8b0>
+Traceback (most recent call last):
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/site-packages/torch/utils/data/dataloader.py", line 1477, in __del__
+    self._shutdown_workers()
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/site-packages/torch/utils/data/dataloader.py", line 1441, in _shutdown_workers
+    w.join(timeout=_utils.MP_STATUS_CHECK_INTERVAL)
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/multiprocessing/process.py", line 149, in join
+    res = self._popen.wait(timeout)
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/multiprocessing/popen_fork.py", line 44, in wait
+    if not wait([self.sentinel], timeout):
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/multiprocessing/connection.py", line 931, in wait
+    ready = selector.select(timeout)
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/selectors.py", line 415, in select
+    fd_event_list = self._selector.poll(timeout)
+KeyboardInterrupt: 
+Training:  30%|██▉       | 114/384 [00:27<01:06,  4.08it/s][2025-11-27 07:46:13,401][asyncio][WARNING] - socket.send() raised exception.
+[2025-11-27 07:46:13,402][asyncio][WARNING] - socket.send() raised exception.
+
+Traceback (most recent call last):
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/runpy.py", line 194, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/runpy.py", line 87, in _run_code
+    exec(code, run_globals)
+  File "/root/workspace/cal-ql-torch/cal_ql/train_offline_single_gpu.py", line 159, in <module>
+    main()
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/site-packages/hydra/main.py", line 94, in decorated_main
+    _run_hydra(
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/site-packages/hydra/_internal/utils.py", line 394, in _run_hydra
+    _run_app(
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/site-packages/hydra/_internal/utils.py", line 457, in _run_app
+    run_and_report(
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/site-packages/hydra/_internal/utils.py", line 220, in run_and_report
+    return func()
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/site-packages/hydra/_internal/utils.py", line 458, in <lambda>
+    lambda: hydra.run(
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/site-packages/hydra/_internal/hydra.py", line 119, in run
+    ret = run_job(
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/site-packages/hydra/core/utils.py", line 186, in run_job
+    ret.return_value = task_function(task_cfg)
+  File "/root/workspace/cal-ql-torch/cal_ql/train_offline_single_gpu.py", line 143, in main
+    train_metrics = sac.train(
+  File "/root/workspace/cal-ql-torch/cal_ql/cal_ql_sac_trainer.py", line 46, in train
+    metrics = self._train_step(batch, use_cql=use_cql, cql_min_q_weight=cql_min_q_weight, enable_calql=enable_calql)
+  File "/root/workspace/cal-ql-torch/cal_ql/cal_ql_sac_trainer.py", line 86, in _train_step
+    self.qf["target_qf2"](next_observations, next_images, new_next_actions),
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/root/workspace/cal-ql-torch/model/model.py", line 311, in forward
+    obs_ft = self.obs_proj(torch.cat([observations, actions], dim=-1))
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/root/workspace/cal-ql-torch/model/model.py", line 57, in forward
+    return self.net(x)
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/site-packages/torch/nn/modules/container.py", line 219, in forward
+    input = module(input)
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1553, in _wrapped_call_impl
+    return self._call_impl(*args, **kwargs)
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/site-packages/torch/nn/modules/module.py", line 1562, in _call_impl
+    return forward_call(*args, **kwargs)
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/site-packages/torch/nn/modules/linear.py", line 117, in forward
+    return F.linear(input, self.weight, self.bias)
+KeyboardInterrupt
+Error in atexit._run_exitfuncs:
+Traceback (most recent call last):
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/subprocess.py", line 1083, in wait
+    return self._wait(timeout=timeout)
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/subprocess.py", line 1822, in _wait
+    (pid, sts) = self._try_wait(0)
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/subprocess.py", line 1780, in _try_wait
+    (pid, sts) = os.waitpid(self.pid, wait_flags)
+KeyboardInterrupt
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/subprocess.py", line 1096, in wait
+    self._wait(timeout=sigint_timeout)
+  File "/root/miniforge/envs/cal-ql/lib/python3.8/subprocess.py", line 1816, in _wait
+    time.sleep(delay)
+KeyboardInterrupt
+[2025-11-27 07:46:13,405][asyncio][WARNING] - socket.send() raised exception.
+[2025-11-27 07:46:13,405][asyncio][WARNING] - socket.send() raised exception.
+[2025-11-27 07:46:13,405][asyncio][WARNING] - socket.send() raised exception.
+[2025-11-27 07:46:13,405][asyncio][WARNING] - socket.send() raised exception.
+[2025-11-27 07:46:13,405][asyncio][WARNING] - socket.send() raised exception.
+[2025-11-27 07:46:13,405][asyncio][WARNING] - socket.send() raised exception.
+[2025-11-27 07:46:13,405][asyncio][WARNING] - socket.send() raised exception.
+[2025-11-27 07:46:13,406][asyncio][WARNING] - socket.send() raised exception.
+[2025-11-27 07:46:13,406][asyncio][WARNING] - socket.send() raised exception.
+[2025-11-27 07:46:13,406][asyncio][WARNING] - socket.send() raised exception.
+[2025-11-27 07:46:13,406][asyncio][WARNING] - socket.send() raised exception.
+[2025-11-27 07:46:13,406][asyncio][WARNING] - socket.send() raised exception.
+[2025-11-27 07:46:13,406][asyncio][WARNING] - socket.send() raised exception.
+[2025-11-27 07:46:13,406][asyncio][WARNING] - socket.send() raised exception.
+[2025-11-27 07:46:13,407][asyncio][WARNING] - socket.send() raised exception.
+[2025-11-27 07:46:13,409][asyncio][WARNING] - socket.send() raised exception.
+[2025-11-27 07:46:13,410][asyncio][WARNING] - socket.send() raised exception.
+[2025-11-27 07:46:13,410][asyncio][WARNING] - socket.send() raised exception.
+[2025-11-27 07:46:13,410][asyncio][WARNING] - socket.send() raised exception.
+[1;34mwandb[0m: 
+[1;34mwandb[0m: 🚀 View run [33md7f0adef84264aea887be3038da204af[0m at: [34m[0m

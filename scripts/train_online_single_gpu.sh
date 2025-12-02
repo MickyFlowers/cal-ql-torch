@@ -1,3 +1,5 @@
+export http_proxy=http://192.168.32.11:18000
+export https_proxy=http://192.168.32.11:18000
 nohup python -m cal_ql.train_online_single_gpu \
     dataset.root_path='/mnt/pfs/datasets/online_rl_data_11_26_15/' \
     logging.output_dir='./experiment_output' \

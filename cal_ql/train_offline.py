@@ -112,7 +112,7 @@ def main(cfg: DictConfig):
     # sac.compile(mode=cfg.torch_compile_mode)
 
     viskit_metrics = {}
-    n_train_step_per_epoch = cfg.n_train_step_per_epoch_offline
+    # n_train_step_per_epoch = cfg.n_train_step_per_epoch_offline
     cql_min_q_weight = cfg.cql_min_q_weight
     enable_calql = cfg.enable_calql
     use_cql = cfg.use_cql

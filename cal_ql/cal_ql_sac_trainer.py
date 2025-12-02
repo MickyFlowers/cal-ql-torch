@@ -16,6 +16,7 @@ from utils.utils import prefix_metrics
 
 class Trainer(object):
     def __init__(self, config, policy, qf):
+        self.freeze_policy = False
         self.config = config
         self.policy = policy
         self.qf = qf
@@ -55,6 +56,7 @@ class Trainer(object):
         actions = batch["action"].to(self.device)
         rewards = batch["reward"].to(self.device)
         dones = batch["done"].to(self.device)
+        success = batch['success'].to(self.device).bool()
         # observations = batch["observations"]
         # actions = batch["actions"]
         # rewards = batch["rewards"]
@@ -76,18 +78,26 @@ class Trainer(object):
             
             q_new_actions = torch.min(self.qf["qf1"](observations, images, new_actions), self.qf["qf2"](observations, images, new_actions))
             policy_loss = (alpha.detach() * log_pi - q_new_actions).mean()
+            if success.any():
+
+                bc_loss = nn.functional.mse_loss(new_actions[success], actions[success])
+            else:
+                bc_loss = torch.tensor(0.0).to(self.device)
+
+            policy_loss = policy_loss + self.config.bc_weight * bc_loss
 
             q1_pred = self.qf["qf1"](observations, images, actions)
             q2_pred = self.qf["qf2"](observations, images, actions)
             if self.config.cql_max_target_backup:
                 new_next_actions, next_log_pi = self.policy(next_observations, next_images, repeat=self.config.cql_n_actions)
-                target_q_values = torch.min(
-                    self.qf["target_qf1"](next_observations, next_images, new_next_actions),
-                    self.qf["target_qf2"](next_observations, next_images, new_next_actions),
+                target_q_values, max_target_indices = torch.max(
+                    torch.min(
+                        self.qf["target_qf1"](next_observations, next_images, new_next_actions),
+                        self.qf["target_qf2"](next_observations, next_images, new_next_actions),
+                    ),
+                    dim=-1
                 )
-                max_target_indices = torch.argmax(target_q_values, dim=-1, keepdim=True)
-                target_q_values = torch.gather(target_q_values, dim=-1, index=max_target_indices).squeeze(-1)
-                next_log_pi = torch.gather(next_log_pi, dim=-1, index=max_target_indices).squeeze(-1)
+                next_log_pi = torch.gather(next_log_pi, -1, max_target_indices.unsqueeze(-1)).squeeze(-1)
             else:
                 new_next_actions, next_log_pi = self.policy(next_observations, next_images)
                 target_q_values = torch.min(
@@ -102,7 +112,7 @@ class Trainer(object):
             if use_cql:
                 batch_size = actions.shape[0]
                 action_dim = actions.shape[-1]
-                cql_random_actions = torch.rand(batch_size, self.config.cql_n_actions, action_dim) * 2 - 1
+                cql_random_actions = torch.rand(batch_size, self.config.cql_n_actions, action_dim, requires_grad=False) * 2 - 1
                 cql_random_actions = cql_random_actions.to(observations.device)
                 cql_current_actions, cql_current_log_pis = self.policy(observations, images, repeat=self.config.cql_n_actions)
                 cql_current_actions, cql_current_log_pis = cql_current_actions.detach(), cql_current_log_pis.detach()
@@ -136,16 +146,16 @@ class Trainer(object):
                     cql_cat_q1 = torch.cat(
                         [
                             cql_q1_rand - random_density,
-                            cql_q1_next_actions - cql_next_log_pis,
-                            cql_q1_current_actions - cql_current_log_pis,
+                            cql_q1_next_actions - cql_next_log_pis.detach(),
+                            cql_q1_current_actions - cql_current_log_pis.detach(),
                         ],
                         dim=1,
                     )
                     cql_cat_q2 = torch.cat(
                         [
                             cql_q2_rand - random_density,
-                            cql_q2_next_actions - cql_next_log_pis,
-                            cql_q2_current_actions - cql_current_log_pis,
+                            cql_q2_next_actions - cql_next_log_pis.detach(),
+                            cql_q2_current_actions - cql_current_log_pis.detach(),
                         ],
                         dim=1,
                     )
@@ -181,9 +191,10 @@ class Trainer(object):
             self.scaler.scale(alpha_loss).backward()
             self.scaler.step(self.optimizers["log_alpha"])
 
-        self.optimizers["policy"].zero_grad()
-        self.scaler.scale(policy_loss).backward()
-        self.scaler.step(self.optimizers["policy"])
+        if not self.freeze_policy:
+            self.optimizers["policy"].zero_grad()
+            self.scaler.scale(policy_loss).backward()
+            self.scaler.step(self.optimizers["policy"])
 
         self.optimizers["qf"].zero_grad()
         self.scaler.scale(qf_loss).backward()
@@ -199,6 +210,7 @@ class Trainer(object):
                     target_param.data.copy_(new_param)
 
         metrics = dict(
+            bc_loss=bc_loss,
             log_pi=log_pi.mean(),
             policy_loss=policy_loss,
             qf1_loss=qf1_loss,
@@ -209,12 +221,14 @@ class Trainer(object):
             average_qf2=q2_pred.mean(),
             average_target_q=target_q_values.mean(),
             total_steps=self._total_steps,
+            mc_returns=mc_returns.mean()
         )
         metrics.update(use_cql=int(use_cql), enable_calql=int(enable_calql), cql_min_q_weight=cql_min_q_weight)
         if use_cql:
             metrics.update(
                 prefix_metrics(
                     dict(
+                        
                         cql_std_q1=cql_std_q1.mean(),
                         cql_std_q2=cql_std_q2.mean(),
                         cql_q1_rand=cql_q1_rand.mean(),
@@ -308,7 +322,23 @@ class Trainer(object):
         if self.config.cql_lagrange and 'log_alpha_prime_state_dict' in checkpoint:
             self.log_alpha_prime.load_state_dict(checkpoint['log_alpha_prime_state_dict'])
         print(f"Loaded checkpoint from {filepath} at total steps {self._total_steps}")
-        
+    def load_policy_checkpoint(self, filepath):
+        checkpoint = torch.load(filepath, map_location=self.device)
+        self.policy.load_state_dict(checkpoint['policy_state_dict'])
+        print(f"Loaded policy checkpoint from {filepath}")
+    
+    def freeze_policy(self):
+        for param_group in self.optimizers["qf"].param_groups:
+            param_group['lr'] = self.config.freeze_qf_lr
+        self.freeze_policy = True
+        self.policy.freeze()
+    
+    def unfreeze_policy(self):
+        for param_group in self.optimizers["qf"].param_groups:
+            param_group['lr'] = self.config.qf_lr
+        self.freeze_policy = False
+        self.policy.unfreeze()
+
     def save_checkpoint(self, filepath):
         checkpoint = {
             'policy_state_dict': self.policy.state_dict(),

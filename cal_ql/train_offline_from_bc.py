@@ -96,6 +96,11 @@ def main(cfg: DictConfig):
     sac = Trainer(cfg.cal_ql, policy, qf)
     # sac.setup_multi_gpu(local_rank)
     sac.to_device(device=device)
+    
+    if cfg.load_policy_ckpt_path != "":
+        sac.load_policy_checkpoint(cfg.load_policy_ckpt_path)
+        sac.freeze_policy()
+    
     if cfg.load_ckpt_path != "":
         sac.load_checkpoint(cfg.load_ckpt_path)
     # print("compiling sac model...")
@@ -130,11 +135,14 @@ def main(cfg: DictConfig):
         if epoch % cfg.save_every_n_epoch == 0 and epoch != 0:
             ckpt_file_path = os.path.join(ckpt_path, f'checkpoint_{epoch:05d}.pt')
             sac.save_checkpoint(ckpt_file_path)
+        
+        if epoch >= cfg.freeze_policy_epochs and cfg.load_policy_ckpt_path != "":
+            sac.unfreeze_policy()
             
         if epoch >= cfg.train_offline_epochs:
             print("Finished Training")
             break
-
+            
         with Timer() as train_timer:
             for batch in tqdm(dataloader, desc="Training"):
             # for _ in tqdm(range(n_train_step_per_epoch), desc="Training"):

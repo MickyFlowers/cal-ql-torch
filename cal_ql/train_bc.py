@@ -10,9 +10,9 @@ from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from cal_ql.cal_ql_sac_trainer import Trainer
+from cal_ql.bc_trainer import BehaviorCloneTrainer
 from data.dataset import CalqlDataset
-from model.model import ResNetPolicy, ResNetQFunction
+from model.model import ResNetPolicy
 from utils.logger import WandBLogger
 from utils.utils import Timer
 from viskit.logging import logger, setup_logger
@@ -30,7 +30,7 @@ def dict_to_device(batch, device):
             batch[k] = v.to(device=device, non_blocking=True)
     return batch
 
-@hydra.main(config_path="../config", config_name="train_offline", version_base=None)
+@hydra.main(config_path="../config", config_name="train_bc", version_base=None)
 def main(cfg: DictConfig):
     device = torch.device(cfg.device)
     variant = OmegaConf.to_container(cfg, resolve=True)
@@ -54,7 +54,6 @@ def main(cfg: DictConfig):
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
 
-
     observation_dim = cfg.observation_dim
     action_dim = cfg.action_dim
 
@@ -69,43 +68,17 @@ def main(cfg: DictConfig):
         cfg.policy_log_std_offset,
         train_backbone=cfg.train_policy_backbone,
     )
-    qf = {}
-    qf['qf1'] = ResNetQFunction(
-        observation_dim,
-        action_dim,
-        cfg.q_obs_proj_arch,
-        cfg.q_out_proj_arch,
-        cfg.hidden_dim,
-        cfg.orthogonal_init,
-        train_backbone=cfg.train_q_backbone
-    )
-    qf['qf2'] = ResNetQFunction(
-        observation_dim,
-        action_dim,
-        cfg.q_obs_proj_arch,
-        cfg.q_out_proj_arch,
-        cfg.hidden_dim,
-        cfg.orthogonal_init,
-        train_backbone=cfg.train_q_backbone
-    )
-    qf['target_qf1'] = copy.deepcopy(qf['qf1'])
-    qf['target_qf2'] = copy.deepcopy(qf['qf2'])
-    if cfg.cal_ql.target_entropy >= 0.0:
-        cfg.cal_ql.target_entropy = -np.prod((1, action_dim)).item()
 
-    sac = Trainer(cfg.cal_ql, policy, qf)
+    bc = BehaviorCloneTrainer(cfg.learning_rate, policy)
     # sac.setup_multi_gpu(local_rank)
-    sac.to_device(device=device)
+    bc.to_device(device=device)
     if cfg.load_ckpt_path != "":
-        sac.load_checkpoint(cfg.load_ckpt_path)
+        bc.load_checkpoint(cfg.load_ckpt_path)
     # print("compiling sac model...")
     # sac.compile(mode=cfg.torch_compile_mode)
 
     viskit_metrics = {}
     # n_train_step_per_epoch = cfg.n_train_step_per_epoch_offline
-    cql_min_q_weight = cfg.cql_min_q_weight
-    enable_calql = cfg.enable_calql
-    use_cql = cfg.use_cql
     total_grad_steps = 0
     train_timer = None
     epoch = 0
@@ -128,10 +101,10 @@ def main(cfg: DictConfig):
         logger.record_dict(viskit_metrics)
         logger.dump_tabular(with_prefix=False, with_timestamp=False)
         if epoch % cfg.save_every_n_epoch == 0 and epoch != 0:
-            ckpt_file_path = os.path.join(ckpt_path, f'checkpoint_{epoch:05d}.pt')
-            sac.save_checkpoint(ckpt_file_path)
+            ckpt_file_path = os.path.join(ckpt_path, f'bc_checkpoint_{epoch:05d}.pt')
+            bc.save_checkpoint(ckpt_file_path)
             
-        if epoch >= cfg.train_offline_epochs:
+        if epoch >= cfg.train_bc_epochs:
             print("Finished Training")
             break
 
@@ -140,17 +113,13 @@ def main(cfg: DictConfig):
             # for _ in tqdm(range(n_train_step_per_epoch), desc="Training"):
                 # batch = next(data_iter)
                 batch = dict_to_device(batch, device=device)
-                train_metrics = sac.train(
-                    batch, use_cql=use_cql, cql_min_q_weight=cql_min_q_weight, enable_calql=enable_calql
-                )
+                train_metrics = bc.train(batch)
                 def post_process(metrics):
                     for k, v in metrics.items():
                         if isinstance(v, torch.Tensor):
                             metrics[k] = v.detach().item()
                     return metrics
                 train_metrics = post_process(train_metrics)
-                
-
             total_grad_steps += len(dataloader)
         epoch += 1
 

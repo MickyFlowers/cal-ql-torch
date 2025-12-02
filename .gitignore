@@ -6,7 +6,7 @@ __pycache__/
 outputs/
 .vscode/
 **/wandb_config.yaml
-dataset/
+./dataset/
 checkpoints/
 
 **.log
