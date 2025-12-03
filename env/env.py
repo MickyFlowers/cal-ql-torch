@@ -111,12 +111,9 @@ class UrEnv(gym.Env):
         return self._env_steps
 
     def _check_obs(self):
-
         if (
             self.ft_value is not None
             and self.img_obs is not None
-            and self.space_mouse_twist is not None
-
         ):
             return True
         else:
@@ -135,27 +132,11 @@ class UrEnv(gym.Env):
         self.ur_robot.servoTcp(new_pose, 1.0 / self.config.ctrl_freq)
             
 
-
+    def action(self, target_pose):
+        self.target_pose = target_pose.copy()
+        
     def step(self, target_pose):
         self.target_pose = target_pose.copy()
-        rospy.Rate(self.config.action_freq).sleep()
-        next_observations = self.get_observation()
-        reward = 0.0
-        done = False
-        info = {"info": "progressing"}
-        key = self.keyboard_reader.get_key()
-        if key == 's':
-            reward = 1.0
-            done = True
-            info["info"] == "success"
-        elif key == 'd':
-            done = True
-            info["info"] = "quit"
-        if self._env_steps >= self.config.max_env_steps - 1:
-            done = True
-            info["info"] = "max_steps_reached"
-        self._env_steps += 1
-        return next_observations, reward, done, info
 
     def get_observation(self):
         tcp_obs = self.tcp_obs.copy()
@@ -187,14 +168,15 @@ class UrEnv(gym.Env):
             
         print("Environment resetting, moving to init pose...")
         reset_pose = np.array(self.config.reset_pose)
-        delta_pose = sample_disturbance(self.config.random_lower, self.config.random_upper)
-        reset_pose = applyDeltaPose6d(reset_pose, delta_pose)
+        # delta_pose = sample_disturbance(self.config.random_lower, self.config.random_upper)
+        # reset_pose = applyDeltaPose6d(reset_pose, delta_pose)
         self.target_pose = reset_pose.copy()
         print("Environment resetting, please wait...")
         first_reset_pose = reset_pose.copy()
         first_reset_pose[:2] = self.ur_robot.tcp_pose[:2]
         self.ur_robot.moveToPose(first_reset_pose, asynchronous=False)
         self.ur_robot.moveToPose(reset_pose, asynchronous=False)
+        self.ur_robot.reset_servo_target_tcp()
         rospy.Rate(1).sleep()
         self.wait_for_obs()
         print("waiting for manully start...")
@@ -205,9 +187,7 @@ class UrEnv(gym.Env):
             if key == 'y':
                 break
         print("Environment reset done.")
-        observations = self.get_observation()
         self.running = True
-        return observations
     
     def wait_for_obs(self):
         while not self._check_obs():
