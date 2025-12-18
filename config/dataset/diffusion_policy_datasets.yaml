@@ -2,6 +2,4 @@ root_path: ./dataset/offline_rl_data_11_17_20
 image_resize: 256
 image_size: 224
 norm_type: max_min
-reward_scale: 1.0
-reward_bias: 0.0
-discount: ${discount}
+horizon: ${pred_horizon}

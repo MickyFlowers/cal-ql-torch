@@ -18,7 +18,7 @@ import env
 from model.model import ResNetPolicy
 
 
-def normalize(data, statistics, norm_type, epsilon=1e-8):
+def normalize(data, statistics, norm_type, epsilon=1e-6):
     if norm_type == 'max_min':
         data_max = np.array(statistics['max']) + epsilon
         data_min = np.array(statistics['min']) - epsilon
@@ -30,7 +30,7 @@ def normalize(data, statistics, norm_type, epsilon=1e-8):
     return data 
 
 
-def denormalize(data, statistics, norm_type, epsilon=1e-8):
+def denormalize(data, statistics, norm_type, epsilon=1e-6):
     if norm_type == 'max_min':
         data_max = np.array(statistics['max']) + epsilon
         data_min = np.array(statistics['min']) - epsilon

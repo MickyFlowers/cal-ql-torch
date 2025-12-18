@@ -1,0 +1,6 @@
+root_path: "/mnt/pfs/datasets/robotmimic/square/ph/image_v15.hdf5"
+image_resize: 256
+image_size: 224
+norm_type: max_min
+split: train
+discount: ${discount}

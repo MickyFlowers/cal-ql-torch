@@ -26,16 +26,14 @@ train_policy_backbone: false
 q_obs_proj_arch: '256-256-256-256'
 q_out_proj_arch: '256-256-256-256'
 train_q_backbone: false
+bc_start_epochs: 10
 
 
 # Offline pretraining / online finetuning schedule
 train_offline_epochs: 100
 
 # CQL related toggles
-use_cql: true
 cql_min_q_weight: 0.5
-enable_calql: true
-
 torch_compile_mode: "max-autotune"
 
 save_every_n_epoch: 20
@@ -44,7 +42,7 @@ load_ckpt_path: ""
 load_policy_ckpt_path: ""
 
 
-
+discount: 0.999
 device: cuda:0
 
 freeze_policy_epochs: 50

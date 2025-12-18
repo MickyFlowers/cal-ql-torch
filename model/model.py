@@ -2,8 +2,18 @@ import numpy as np
 import timm
 import torch
 import torch.nn as nn
-from torch.distributions import Normal
+from torch.distributions import Independent, Normal
+from torch.distributions.transformed_distribution import \
+    TransformedDistribution
+from torch.distributions.transforms import TanhTransform
 
+from model.distribution import TanhNormal
+
+
+def atanh(x):
+    one_plus_x = (1 + x).clamp(min=1e-6)
+    one_minus_x = (1 - x).clamp(min=1e-6)
+    return 0.5*torch.log(one_plus_x/ one_minus_x)
 
 def extend_and_repeat(tensor, dim, repeat):
     # Extend and repeast the tensor along dim axie and repeat it
@@ -216,51 +226,82 @@ class ResNetPolicy(nn.Module):
         self.out_proj = FullyConnectedNetwork(
             input_dim=2*hidden_dim, output_dim=2 * action_dim, arch=out_proj_arch, orthogonal_init=orthogonal_init
         )
+
+    def _encode_image(self, images):
+        # Runs the heavy backbone once and returns pooled image features
+        image_ft_map = self.backbone(images)[0]
+        return self.image_feature_proj(image_ft_map)
+
+    def _encode_obs(self, observations):
+        return self.obs_proj(observations)
         
-    def forward(self, observations, images, deterministic=False, repeat=None):
+    def forward(self, observations, images, deterministic=False):
         # observations: [batch, obs_dim]
         # images: [batch, 3, H, W]
-        image_ft_map = self.backbone(images)[0]
-        image_ft = self.image_feature_proj(image_ft_map)
-        
-        obs_ft = self.obs_proj(observations)
+        image_ft = self._encode_image(images)
+        obs_ft = self._encode_obs(observations)
         ft = torch.cat([obs_ft, image_ft], dim=-1)
         
         base_out = self.out_proj(ft)
-        if repeat is not None:
-            base_out = extend_and_repeat(base_out, 1, repeat)
         mean, log_std = torch.chunk(base_out, 2, dim=-1)
         log_std = self.log_std_multiplier() * log_std + self.log_std_offset()
         log_std = torch.clamp(log_std, -20.0, 2.0)
         std = torch.exp(log_std)
-        dist = Normal(mean, std)
+        log_prob = None
         if deterministic:
-            pre_tanh_actions = mean
+            action = torch.tanh(mean)
         else:
-            pre_tanh_actions = dist.rsample()
-        log_prob = torch.sum(dist.log_prob(pre_tanh_actions), dim=-1)
-        log_prob -= (2 * (np.log(2) - pre_tanh_actions - nn.functional.softplus(-2 * pre_tanh_actions))).sum(dim=-1)
-        return torch.tanh(pre_tanh_actions), log_prob
+            tanh_normal = TanhNormal(mean, std)
+            action, pre_tanh_value = tanh_normal.rsample(return_pretanh_value=True)
+            log_prob = tanh_normal.log_prob(action, pre_tanh_value=pre_tanh_value)
+            log_prob = log_prob.sum(dim=-1, keepdim=True)
+
+        return action, log_prob
+
+    def sample_actions(self, observations, images, num_actions, deterministic=False):
+        # Samples multiple actions per (obs, image) pair with a single backbone pass
+        image_ft = self._encode_image(images)
+        obs_ft = self._encode_obs(observations)
+        base_ft = torch.cat([obs_ft, image_ft], dim=-1)
+        base_ft = base_ft.unsqueeze(1).expand(-1, num_actions, -1).reshape(-1, base_ft.shape[-1])
+
+        base_out = self.out_proj(base_ft)
+        mean, log_std = torch.chunk(base_out, 2, dim=-1)
+        log_std = self.log_std_multiplier() * log_std + self.log_std_offset()
+        log_std = torch.clamp(log_std, -20.0, 2.0)
+        std = torch.exp(log_std)
+        tanh_normal = TanhNormal(mean, std)
+        if deterministic:
+            action = torch.tanh(mean)
+            log_prob = None
+        else:
+            action, pre_tanh_value = tanh_normal.rsample(return_pretanh_value=True)
+            log_prob = tanh_normal.log_prob(action, pre_tanh_value=pre_tanh_value)
+            log_prob = log_prob.sum(dim=-1)
+
+        action = action.view(observations.shape[0], num_actions, -1)
+        if log_prob is not None:
+            log_prob = log_prob.view(observations.shape[0], num_actions)
+        return action, log_prob
 
     def log_prob(self, observations, images, actions):
+        raw_actions = atanh(actions)
         image_ft_map = self.backbone(images)[0]
         image_ft = self.image_feature_proj(image_ft_map)
+        
         obs_ft = self.obs_proj(observations)
         ft = torch.cat([obs_ft, image_ft], dim=-1)
         
         base_out = self.out_proj(ft)
-        if actions.dim() == 3:
-            base_out = base_out.reshape(-1, base_out.shape[-1])
         mean, log_std = torch.chunk(base_out, 2, dim=-1)
         log_std = self.log_std_multiplier() * log_std + self.log_std_offset()
         log_std = torch.clamp(log_std, -20.0, 2.0)
         std = torch.exp(log_std)
-        dist = Normal(mean, std)
-        pre_tanh_actions = torch.log((1 + actions) / (1 - actions)) / 2
-        log_prob = dist.log_prob(pre_tanh_actions).sum(dim=-1)
-        log_prob -= (2 * (np.log(2) - pre_tanh_actions - nn.functional.softplus(-2 * pre_tanh_actions))).sum(dim=-1)
+        tanh_normal = TanhNormal(mean, std)
+        log_prob = tanh_normal.log_prob(value=actions, pre_tanh_value=raw_actions)
+        return log_prob.sum(-1)
 
-        return log_prob
+
 
     def freeze(self):
         for param in self.parameters():
@@ -320,24 +361,37 @@ class ResNetQFunction(nn.Module):
         self.out_proj = FullyConnectedNetwork(
             input_dim=2*hidden_dim, output_dim=1, arch=out_proj_arch, orthogonal_init=orthogonal_init
         )
+
+    def _encode_image(self, images):
+        image_ft_map = self.backbone(images)[0]
+        return self.image_feature_proj(image_ft_map)
         
     def forward(self, observations, images, actions):
+        
         # observations: [batch, obs_dim]
         # images: [batch, 3, H, W]
-        batch_size = observations.shape[0]
+        
         image_ft_map = self.backbone(images)[0]
         image_ft = self.image_feature_proj(image_ft_map)
-        multi_action = False
-        if actions.dim() == 3 and observations.dim() == 2:
-            multi_action = True
-            observations = extend_and_repeat(observations, 1, actions.shape[1]).reshape(-1, observations.shape[-1])
-            image_ft = extend_and_repeat(image_ft, 1, actions.shape[1]).reshape(-1, image_ft.shape[-1])
-            actions = actions.reshape(-1, actions.shape[-1])
         obs_ft = self.obs_proj(torch.cat([observations, actions], dim=-1))
         ft = torch.cat([obs_ft, image_ft], dim=-1)
         
-        q_value = self.out_proj(ft).squeeze(-1)
-        if multi_action:
-            q_value = q_value.reshape(batch_size, -1)
+        q_value = self.out_proj(ft)
         return q_value
+
+    def evaluate_actions(self, observations, images, actions):
+        # Efficiently evaluates Q for many actions sharing the same obs/image
+        action_shape = actions.shape[0]
+        obs_shape = observations.shape[0]
+        num_repeat = int(action_shape / obs_shape)
+
+        image_ft = self._encode_image(images)
+        image_ft = image_ft.repeat_interleave(num_repeat, dim=0)
+
+        obs_rep = observations.repeat_interleave(num_repeat, dim=0)
+        obs_actions = torch.cat([obs_rep, actions], dim=-1)
+        obs_ft = self.obs_proj(obs_actions)
+        ft = torch.cat([obs_ft, image_ft], dim=-1)
+        q_value = self.out_proj(ft)
+        return q_value.view(obs_shape, num_repeat, 1)
 

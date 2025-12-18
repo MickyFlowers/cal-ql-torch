@@ -11,7 +11,7 @@ from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from data.dataset import CalqlDataset
+from data.dataset import DiffusionPolicyDataset
 from diffusion_policy.trainer import Trainer
 from model.diffusion_policy import DiffusionPolicy
 from model.vision_model import VitFeatureExtractor
@@ -45,7 +45,7 @@ def main(cfg: DictConfig):
         base_log_dir=cfg.logging.output_dir,
         include_exp_prefix_sub_dir=False,
     )
-    dataset = CalqlDataset(cfg.dataset)
+    dataset = DiffusionPolicyDataset(cfg.dataset)
     dataloader = DataLoader(
         dataset,
         batch_size=cfg.batch_size,
@@ -68,12 +68,15 @@ def main(cfg: DictConfig):
         img_token_dim=cfg.img_token_dim,
         state_token_dim=cfg.state_token_dim,
         img_cond_len=cfg.img_cond_len,
-        img_pos_embed_config=cfg.img_pos_embed_config)
+        img_pos_embed_config=cfg.img_pos_embed_config, 
+        dtype=torch.bfloat16 if cfg.use_bf16 else torch.float32,
+    )
     
     vision_encoder = VitFeatureExtractor(
         cfg.model_name, 
         True,
         cfg.trainable_layers,
+        dtype=torch.bfloat16 if cfg.use_bf16 else torch.float32,
     )
     dp_trainer = Trainer(policy, vision_encoder, cfg.trainer)
     # dp_trainer.setup_multi_gpu(local_rank)
@@ -116,7 +119,8 @@ def main(cfg: DictConfig):
             break
 
         with Timer() as train_timer:
-            for batch in tqdm(dataloader, desc="Training"):
+            pbar = tqdm(dataloader, total=len(dataloader), desc=f"Epoch {epoch} Training")
+            for batch in pbar:
             # for _ in tqdm(range(n_train_step_per_epoch), desc="Training"):
                 # batch = next(data_iter)
                 batch = dict_to_device(batch, device=device)
@@ -127,6 +131,7 @@ def main(cfg: DictConfig):
                             metrics[k] = v.detach().item()
                     return metrics
                 train_metrics = post_process(train_metrics)
+                pbar.set_postfix(train_metrics)
                 
             total_grad_steps += len(dataloader)
         epoch += 1

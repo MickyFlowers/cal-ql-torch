@@ -1,17 +1,17 @@
-import logging
-import os
-import time
 
 import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
-from torch.amp import GradScaler, autocast
+from torch.distributions import Independent, Normal
+from torch.distributions.transformed_distribution import \
+    TransformedDistribution
+from torch.distributions.transforms import TanhTransform
 from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.nn.utils import clip_grad_norm_
 
 from model.model import Scaler
-from utils.utils import prefix_metrics
 
 
 class Trainer(object):
@@ -23,32 +23,28 @@ class Trainer(object):
         assert len(qf) == 4, "Expected two Q-functions and their targets."
         self.optimizers = {}
         self.optimizers["policy"] = optim.Adam(self.policy.parameters(), lr=config.policy_lr)
-        self.optimizers["qf"] = optim.Adam(
-            list(self.qf["qf1"].parameters()) + list(self.qf["qf2"].parameters()), lr=config.qf_lr
-        )
-        self.scaler = GradScaler()
+        self.optimizers['qf1'] = optim.Adam(self.qf['qf1'].parameters(), lr=config.qf_lr)
+        self.optimizers['qf2'] = optim.Adam(self.qf['qf2'].parameters(), lr=config.qf_lr)   
+        
+        self.log_alpha = Scaler(1.0)
+        self.optimizers["log_alpha"] = optim.Adam(self.log_alpha.parameters(), lr=config.policy_lr)
 
-        if self.config.use_automatic_entropy_tuning:
-            self.log_alpha = Scaler(0.0)
-            self.optimizers["log_alpha"] = optim.Adam(self.log_alpha.parameters(), lr=config.policy_lr)
-
-        if self.config.cql_lagrange:
-            self.log_alpha_prime = Scaler(1.0)
-            self.optimizers["log_alpha_prime"] = optim.Adam(self.log_alpha_prime.parameters(), lr=config.qf_lr)
+        
+        self.log_alpha_prime = Scaler(self.config.alpha_prime)
+        self.optimizers["log_alpha_prime"] = optim.Adam(self.log_alpha_prime.parameters(), lr=config.qf_lr)
+            
         self._total_steps = 0
         self._modules = [self.policy, self.qf['qf1'], self.qf['qf2'], self.qf['target_qf1'], self.qf['target_qf2']]
-        if self.config.use_automatic_entropy_tuning:
-            self._modules.append(self.log_alpha)
-        if self.config.cql_lagrange:
-            self._modules.append(self.log_alpha_prime)
+        self._modules.append(self.log_alpha)
+        self._modules.append(self.log_alpha_prime)
 
-    def train(self, batch,  use_cql=True, cql_min_q_weight=5.0, enable_calql=False):
+    def train(self, batch, cql_min_q_weight=5.0):
         self._total_steps += 1
-        metrics = self._train_step(batch, use_cql=use_cql, cql_min_q_weight=cql_min_q_weight, enable_calql=enable_calql)
+        metrics = self._train_step(batch, cql_min_q_weight=cql_min_q_weight)
         return metrics
-    
 
-    def _train_step(self, batch, use_cql=True, cql_min_q_weight=5.0, enable_calql=False):
+    def _train_step(self, batch, cql_min_q_weight=5.0):
+        info = {}
         observations = batch["observations"]['proprio'].to(self.device)
         images = batch["observations"]['image'].to(self.device)
         next_observations = batch["next_observations"]['proprio'].to(self.device)
@@ -56,150 +52,145 @@ class Trainer(object):
         actions = batch["action"].to(self.device)
         rewards = batch["reward"].to(self.device)
         dones = batch["done"].to(self.device)
-        success = batch['success'].to(self.device).bool()
-        # observations = batch["observations"]
-        # actions = batch["actions"]
-        # rewards = batch["rewards"]
-        # next_observations = batch["next_observations"]
-        # dones = batch["dones"]
+        mc_returns = batch["mc_return"].to(self.device)
+        bsize = actions.shape[0]
+
+        new_obs_actions, log_pi= self.policy(observations, images)
+        info.update({'actor/log_pi_mean': log_pi.mean().item()})
+        alpha_loss = -(self.log_alpha() * (log_pi + self.config.target_entropy).detach()).mean()
+        info.update({'actor/alpha_loss': alpha_loss.item()})
+        self.optimizers["log_alpha"].zero_grad()
+        alpha_loss.backward()
+        self.optimizers["log_alpha"].step()
+        alpha = self.log_alpha().exp()
+        info.update({
+            'actor/alpha': alpha.item(),
+            'actor/log_alpha': self.log_alpha().item()
+        })
+
+        q_new_actions = torch.min(
+            self.qf['qf1'](observations, images, new_obs_actions),
+            self.qf['qf2'](observations, images, new_obs_actions),
+        ) if self._total_steps >= self.config.bc_start_step else self.policy.log_prob(observations, images, actions)
+        info.update({'actor/q_new_actions_mean': q_new_actions.mean().item()})
+        policy_loss = (alpha*log_pi - q_new_actions).mean()
+        info.update({'actor/policy_loss': policy_loss.item()})
+
+        q1_pred = self.qf['qf1'](observations, images, actions)
+        q2_pred = self.qf['qf2'](observations, images, actions)
+        info.update({
+            'critic/q1_pred_mean': q1_pred.mean().item(),
+            'critic/q1_pred_std': q1_pred.std().item(),
+            'critic/q2_pred_mean': q2_pred.mean().item(),
+            'critic/q2_pred_std': q2_pred.std().item(),
+        })
+
+        next_actions_temp, _ = self._get_policy_actions(next_observations, next_images, num_actions=self.config.cql_n_actions, network=self.policy)
+        target_qf1_values = self._get_tensor_values(next_observations, next_images, next_actions_temp, network=self.qf['target_qf1']).max(1)[0].view(-1, 1)
+        target_qf2_values = self._get_tensor_values(next_observations, next_images, next_actions_temp, network=self.qf['target_qf2']).max(1)[0].view(-1, 1)
+        target_q_values = torch.min(target_qf1_values, target_qf2_values)
+        q_target = rewards.view(-1, 1) + (1. - dones.view(-1, 1)) * self.config.discount * target_q_values
+        q_target = q_target.detach()
+        info.update({
+            'critic/q_target_mean': q_target.mean().item(),
+            'critic/q_target_min': q_target.min().item(),
+            'critic/q_target_max': q_target.max().item(),
+        })
+        qf1_loss = nn.functional.mse_loss(q1_pred, q_target)
+        qf2_loss = nn.functional.mse_loss(q2_pred, q_target)
+        info.update({
+            'critic/qf1_loss_mse': qf1_loss.item(),
+            'critic/qf2_loss_mse': qf2_loss.item(),
+        })
+        random_actions_tensor = torch.FloatTensor(q2_pred.shape[0] * self.config.cql_n_actions, actions.shape[-1]).uniform_(-1, 1).to(self.device)
+        curr_actions_tensor, curr_log_pis = self._get_policy_actions(observations, images, num_actions=self.config.cql_n_actions, network=self.policy)
+        new_curr_actions_tensor, new_log_pis = self._get_policy_actions(next_observations, next_images, num_actions=self.config.cql_n_actions, network=self.policy)
+        q1_rand = self._get_tensor_values(observations, images, random_actions_tensor, network=self.qf['qf1'])
+        q2_rand = self._get_tensor_values(observations, images, random_actions_tensor, network=self.qf['qf2'])
+        q1_curr_actions = self._get_tensor_values(observations, images, curr_actions_tensor, network=self.qf['qf1'])
+        q2_curr_actions = self._get_tensor_values(observations, images, curr_actions_tensor, network=self.qf['qf2'])
+        q1_next_actions = self._get_tensor_values(observations, images, new_curr_actions_tensor, network=self.qf['qf1'])
+        q2_next_actions = self._get_tensor_values(observations, images, new_curr_actions_tensor, network=self.qf['qf2'])
+        info.update({
+            'critic/cql_q1_rand_mean': q1_rand.mean().item(),
+            'critic/cql_q2_rand_mean': q2_rand.mean().item(),
+            'critic/cql_q1_curr_actions_mean': q1_curr_actions.mean().item(),
+            'critic/cql_q2_curr_actions_mean': q2_curr_actions.mean().item(),
+            'critic/cql_q1_next_actions_mean': q1_next_actions.mean().item(),
+            'critic/cql_q2_next_actions_mean': q2_next_actions.mean().item(),
+        })
+        cat_q1 = torch.cat(
+            [q1_rand, q1_pred.unsqueeze(1), q1_next_actions, q1_curr_actions], 1
+        )
+        cat_q2 = torch.cat(
+            [q2_rand, q2_pred.unsqueeze(1), q2_next_actions, q2_curr_actions], 1
+        )
+        std_q1 = torch.std(cat_q1, dim=1)
+        std_q2 = torch.std(cat_q2, dim=1)
+        info.update({
+            'critic/cql_q1_std_mean': std_q1.mean().item(),
+            'critic/cql_q2_std_mean': std_q2.mean().item(),
+        })
+        random_density = np.log(0.5 ** curr_actions_tensor.shape[-1])
+        cat_q1 = torch.cat(
+            [q1_rand - random_density, q1_next_actions - new_log_pis.detach(), q1_curr_actions - curr_log_pis.detach()], 1
+        )
+        cat_q2 = torch.cat(
+            [q2_rand - random_density, q2_next_actions - new_log_pis.detach(), q2_curr_actions - curr_log_pis.detach()], 1
+        )
+        min_qf1_loss = torch.logsumexp(cat_q1 / self.config.cql_temp, dim=1,).mean() * cql_min_q_weight * self.config.cql_temp
+        min_qf2_loss = torch.logsumexp(cat_q2 / self.config.cql_temp, dim=1,).mean() * cql_min_q_weight * self.config.cql_temp
+        info.update({
+            'critic/cql_logsumexp_loss_q1': min_qf1_loss.item(),
+            'critic/cql_logsumexp_loss_q2': min_qf2_loss.item(),
+        })
+        """Subtract the log likelihood of data"""
+        min_qf1_loss = min_qf1_loss - q1_pred.mean() * cql_min_q_weight
+        min_qf2_loss = min_qf2_loss - q2_pred.mean() * cql_min_q_weight
+        info.update({
+            'critic/cql_loss_q1_diff': min_qf1_loss.item(),
+            'critic/cql_loss_q2_diff': min_qf2_loss.item(),
+        })
+        alpha_prime = torch.clamp(self.log_alpha_prime().exp(), min=0.0, max=1000000.0)
+        min_qf1_loss = alpha_prime * (min_qf1_loss - self.config.cql_target_action_gap)
+        min_qf2_loss = alpha_prime * (min_qf2_loss - self.config.cql_target_action_gap)
+        info.update({
+            'critic/cql_min_qf1_loss_final': min_qf1_loss.item(),
+            'critic/cql_min_qf2_loss_final': min_qf2_loss.item(),
+            'critic/alpha_prime': alpha_prime.item(),
+            'critic/log_alpha_prime': self.log_alpha_prime().item(),
+        })
+
+        self.optimizers['log_alpha_prime'].zero_grad()
+        alpha_prime_loss = (-min_qf1_loss - min_qf2_loss)*0.5 
+        info.update({'critic/alpha_prime_loss': alpha_prime_loss.item()})
+        alpha_prime_loss.backward(retain_graph=True)
+        self.optimizers['log_alpha_prime'].step()
+        qf1_loss = qf1_loss + min_qf1_loss
+        qf2_loss = qf2_loss + min_qf2_loss
+        info.update({
+            'critic/total_qf1_loss': qf1_loss.item(),
+            'critic/total_qf2_loss': qf2_loss.item(),
+        })
+
+        """
+        Update networks
+        """
+        # Update the Q-functions iff '
+        self.optimizers['policy'].zero_grad()
+        policy_loss.backward(retain_graph=False)
+        self.optimizers['policy'].step()
+
+        self.optimizers['qf1'].zero_grad()
+        qf1_loss.backward(retain_graph=True)
+        self.optimizers['qf1'].step()
+
         
-        # Policy forward
-        with autocast(device_type=observations.device.type, enabled=torch.is_autocast_enabled()):
-            new_actions, log_pi = self.policy(observations, images)
+        self.optimizers['qf2'].zero_grad()
+        qf2_loss.backward(retain_graph=True)
+        self.optimizers['qf2'].step()
 
-            if self.config.use_automatic_entropy_tuning:
-                alpha_loss = -(self.log_alpha() * (log_pi + self.config.target_entropy).detach()).mean()
-                alpha = torch.exp(self.log_alpha()) * self.config.alpha_multiplier
-            else:
-                alpha_loss = 0.0
-                alpha = self.config.alpha_multiplier
-
-            # Q forward
-            
-            q_new_actions = torch.min(self.qf["qf1"](observations, images, new_actions), self.qf["qf2"](observations, images, new_actions))
-            policy_loss = (alpha.detach() * log_pi - q_new_actions).mean()
-            if success.any():
-
-                bc_loss = nn.functional.mse_loss(new_actions[success], actions[success])
-            else:
-                bc_loss = torch.tensor(0.0).to(self.device)
-
-            policy_loss = policy_loss + self.config.bc_weight * bc_loss
-
-            q1_pred = self.qf["qf1"](observations, images, actions)
-            q2_pred = self.qf["qf2"](observations, images, actions)
-            if self.config.cql_max_target_backup:
-                new_next_actions, next_log_pi = self.policy(next_observations, next_images, repeat=self.config.cql_n_actions)
-                target_q_values, max_target_indices = torch.max(
-                    torch.min(
-                        self.qf["target_qf1"](next_observations, next_images, new_next_actions),
-                        self.qf["target_qf2"](next_observations, next_images, new_next_actions),
-                    ),
-                    dim=-1
-                )
-                next_log_pi = torch.gather(next_log_pi, -1, max_target_indices.unsqueeze(-1)).squeeze(-1)
-            else:
-                new_next_actions, next_log_pi = self.policy(next_observations, next_images)
-                target_q_values = torch.min(
-                    self.qf["target_qf1"](next_observations, next_images, new_next_actions),
-                    self.qf["target_qf2"](next_observations, next_images, new_next_actions),
-                )
-            if self.config.backup_entropy:
-                target_q_values = target_q_values - alpha * next_log_pi
-            td_target = rewards + (1.0 - dones) * self.config.discount * target_q_values
-            qf1_loss = nn.functional.mse_loss(q1_pred, td_target.detach())
-            qf2_loss = nn.functional.mse_loss(q2_pred, td_target.detach())
-            if use_cql:
-                batch_size = actions.shape[0]
-                action_dim = actions.shape[-1]
-                cql_random_actions = torch.rand(batch_size, self.config.cql_n_actions, action_dim, requires_grad=False) * 2 - 1
-                cql_random_actions = cql_random_actions.to(observations.device)
-                cql_current_actions, cql_current_log_pis = self.policy(observations, images, repeat=self.config.cql_n_actions)
-                cql_current_actions, cql_current_log_pis = cql_current_actions.detach(), cql_current_log_pis.detach()
-                cql_next_actions, cql_next_log_pis = self.policy(next_observations, next_images, repeat=self.config.cql_n_actions)
-                cql_next_actions, cql_next_log_pis = cql_next_actions.detach(), cql_next_log_pis.detach()
-                cql_q1_rand = self.qf["qf1"](observations, images, cql_random_actions)
-                cql_q2_rand = self.qf["qf2"](observations, images, cql_random_actions)
-                cql_q1_current_actions = self.qf["qf1"](observations, images, cql_current_actions)
-                cql_q2_current_actions = self.qf["qf2"](observations, images, cql_current_actions)
-                cql_q1_next_actions = self.qf["qf1"](observations, images, cql_next_actions)
-                cql_q2_next_actions = self.qf["qf2"](observations, images, cql_next_actions)
-                """ Cal-QL: prepare for Cal-QL, and calculate how much data will be lower bounded for logging """
-                mc_returns = batch["mc_return"].to(self.device)
-                lower_bounds = mc_returns.view(-1, 1).repeat(1, cql_q1_current_actions.shape[1])
-                if enable_calql:
-                    cql_q1_current_actions = torch.maximum(cql_q1_current_actions, lower_bounds)
-                    cql_q2_current_actions = torch.maximum(cql_q2_current_actions, lower_bounds)
-                    cql_q1_next_actions = torch.maximum(cql_q1_next_actions, lower_bounds)
-                    cql_q2_next_actions = torch.maximum(cql_q2_next_actions, lower_bounds)
-
-                cql_cat_q1 = torch.cat(
-                    [cql_q1_rand, q1_pred.unsqueeze(1), cql_q1_next_actions, cql_q1_current_actions], dim=1
-                )
-                cql_cat_q2 = torch.cat(
-                    [cql_q2_rand, q2_pred.unsqueeze(1), cql_q2_next_actions, cql_q2_current_actions], dim=1
-                )
-                cql_std_q1 = torch.std(cql_cat_q1, dim=1)
-                cql_std_q2 = torch.std(cql_cat_q2, dim=1)
-                if self.config.cql_importance_sample:
-                    random_density = np.log(0.5**action_dim)
-                    cql_cat_q1 = torch.cat(
-                        [
-                            cql_q1_rand - random_density,
-                            cql_q1_next_actions - cql_next_log_pis.detach(),
-                            cql_q1_current_actions - cql_current_log_pis.detach(),
-                        ],
-                        dim=1,
-                    )
-                    cql_cat_q2 = torch.cat(
-                        [
-                            cql_q2_rand - random_density,
-                            cql_q2_next_actions - cql_next_log_pis.detach(),
-                            cql_q2_current_actions - cql_current_log_pis.detach(),
-                        ],
-                        dim=1,
-                    )
-                cql_qf1_ood = torch.logsumexp(cql_cat_q1 / self.config.cql_temp, dim=1) * self.config.cql_temp
-                cql_qf2_ood = torch.logsumexp(cql_cat_q2 / self.config.cql_temp, dim=1) * self.config.cql_temp
-                cql_qf1_diff = torch.clamp(
-                    cql_qf1_ood - q1_pred, self.config.cql_clip_diff_min, self.config.cql_clip_diff_max
-                ).mean()
-                cql_qf2_diff = torch.clamp(
-                    cql_qf2_ood - q2_pred, self.config.cql_clip_diff_min, self.config.cql_clip_diff_max
-                ).mean()
-                if self.config.cql_lagrange:
-                    alpha_prime = torch.clamp(torch.exp(self.log_alpha_prime()), 0.0, 1000000.0)
-                    cql_min_qf1_loss = alpha_prime * cql_min_q_weight * (cql_qf1_diff - self.config.cql_target_action_gap)
-                    cql_min_qf2_loss = alpha_prime * cql_min_q_weight * (cql_qf2_diff - self.config.cql_target_action_gap)
-                    alpha_prime_loss = (-cql_min_qf1_loss - cql_min_qf2_loss) * 0.5
-                else:
-                    cql_min_qf1_loss = cql_qf1_diff * cql_min_q_weight
-                    cql_min_qf2_loss = cql_qf2_diff * cql_min_q_weight
-                    alpha_prime_loss = torch.tensor(0.0)
-                    alpha_prime = torch.tensor(0.0)
-                qf_loss = qf1_loss + qf2_loss + cql_min_qf1_loss + cql_min_qf2_loss
-            else:
-                qf_loss = qf1_loss + qf2_loss
-
-        if self.config.cql_lagrange and use_cql:
-            self.optimizers["log_alpha_prime"].zero_grad()
-            self.scaler.scale(alpha_prime_loss).backward(retain_graph=True)
-            self.scaler.step(self.optimizers["log_alpha_prime"])
-
-        if self.config.use_automatic_entropy_tuning:
-            self.optimizers["log_alpha"].zero_grad()
-            self.scaler.scale(alpha_loss).backward()
-            self.scaler.step(self.optimizers["log_alpha"])
-
-        if not self.freeze_policy:
-            self.optimizers["policy"].zero_grad()
-            self.scaler.scale(policy_loss).backward()
-            self.scaler.step(self.optimizers["policy"])
-
-        self.optimizers["qf"].zero_grad()
-        self.scaler.scale(qf_loss).backward()
-        self.scaler.step(self.optimizers["qf"])
-        self.scaler.update()
+        
         if self._total_steps % self.config.target_update_interval == 0:
             with torch.no_grad():
                 for target_param, param in zip(self.qf["target_qf1"].parameters(), self.qf["qf1"].parameters()):
@@ -208,47 +199,37 @@ class Trainer(object):
                 for target_param, param in zip(self.qf["target_qf2"].parameters(), self.qf["qf2"].parameters()):
                     new_param = (1 - self.config.soft_target_update_rate) * target_param.data + self.config.soft_target_update_rate * param.data
                     target_param.data.copy_(new_param)
+        return info
 
-        metrics = dict(
-            bc_loss=bc_loss,
-            log_pi=log_pi.mean(),
-            policy_loss=policy_loss,
-            qf1_loss=qf1_loss,
-            qf2_loss=qf2_loss,
-            alpha_loss=alpha_loss,
-            alpha=alpha,
-            average_qf1=q1_pred.mean(),
-            average_qf2=q2_pred.mean(),
-            average_target_q=target_q_values.mean(),
-            total_steps=self._total_steps,
-            mc_returns=mc_returns.mean()
+    def _get_tensor_values(self, obs, images, actions, network=None):
+        if hasattr(network, "evaluate_actions"):
+            return network.evaluate_actions(obs, images, actions)
+
+        action_shape = actions.shape[0]
+        obs_shape = obs.shape[0]
+        num_repeat = int(action_shape / obs_shape)
+        obs_temp = obs.unsqueeze(1).repeat(1, num_repeat, 1).view(obs.shape[0] * num_repeat, obs.shape[1])
+        images_temp = images.unsqueeze(1).repeat(1, num_repeat, 1, 1, 1).view(images.shape[0] * num_repeat, images.shape[1], images.shape[2], images.shape[3])
+        preds = network(obs_temp, images_temp, actions)
+        preds = preds.view(obs.shape[0], num_repeat, 1)
+        return preds
+
+    def _get_policy_actions(self, obs, images, num_actions, network=None):
+        if hasattr(network, "sample_actions"):
+            actions, log_pi = network.sample_actions(obs, images, num_actions=num_actions, deterministic=False)
+            actions = actions.reshape(obs.shape[0] * num_actions, -1)
+            if log_pi is None:
+                log_pi = torch.zeros(obs.shape[0], num_actions, device=obs.device)
+            return actions.detach(), log_pi.view(obs.shape[0], num_actions, 1).detach()
+
+        obs_temp = obs.unsqueeze(1).repeat(1, num_actions, 1).view(obs.shape[0] * num_actions, obs.shape[1])
+        images_temp = images.unsqueeze(1).repeat(1, num_actions, 1, 1, 1).view(images.shape[0] * num_actions, images.shape[1], images.shape[2], images.shape[3])  
+        new_obs_actions, new_obs_log_pi = network(
+            obs_temp, images_temp
         )
-        metrics.update(use_cql=int(use_cql), enable_calql=int(enable_calql), cql_min_q_weight=cql_min_q_weight)
-        if use_cql:
-            metrics.update(
-                prefix_metrics(
-                    dict(
-                        
-                        cql_std_q1=cql_std_q1.mean(),
-                        cql_std_q2=cql_std_q2.mean(),
-                        cql_q1_rand=cql_q1_rand.mean(),
-                        cql_q2_rand=cql_q2_rand.mean(),
-                        cql_min_qf1_loss=cql_min_qf1_loss.mean(),
-                        cql_min_qf2_loss=cql_min_qf2_loss.mean(),
-                        cql_qf1_diff=cql_qf1_diff.mean(),
-                        cql_qf2_diff=cql_qf2_diff.mean(),
-                        cql_q1_current_actions=cql_q1_current_actions.mean(),
-                        cql_q2_current_actions=cql_q2_current_actions.mean(),
-                        cql_q1_next_actions=cql_q1_next_actions.mean(),
-                        cql_q2_next_actions=cql_q2_next_actions.mean(),
-                        alpha_prime_loss=alpha_prime_loss,
-                        alpha_prime=alpha_prime,
-                    ),
-                    "cql",
-                )
-            )
-        return metrics
 
+        return new_obs_actions.detach(), new_obs_log_pi.view(obs.shape[0], num_actions, 1).detach()
+    
     def to_device(self, device):
         self.device = device
         self.policy.to(device)
@@ -256,8 +237,7 @@ class Trainer(object):
         self.qf['qf2'].to(device)
         self.qf['target_qf1'].to(device)
         self.qf['target_qf2'].to(device)
-        if self.config.use_automatic_entropy_tuning:
-            self.log_alpha.to(device)
+        self.log_alpha.to(device)
         if self.config.cql_lagrange:
             self.log_alpha_prime.to(device)
 
@@ -267,8 +247,7 @@ class Trainer(object):
         self.qf['qf2'] = torch.compile(self.qf['qf2'], mode=mode)
         self.qf['target_qf1'] = torch.compile(self.qf['target_qf1'], mode=mode)
         self.qf['target_qf2'] = torch.compile(self.qf['target_qf2'], mode=mode)
-        if self.config.use_automatic_entropy_tuning:
-            self.log_alpha = torch.compile(self.log_alpha, mode=mode)
+        self.log_alpha = torch.compile(self.log_alpha, mode=mode)
         if self.config.cql_lagrange:
             self.log_alpha_prime = torch.compile(self.log_alpha_prime, mode=mode)
         
@@ -299,8 +278,7 @@ class Trainer(object):
             list(self.qf['qf1'].parameters()) + list(self.qf['qf2'].parameters()), lr=self.config.qf_lr
         )
         
-        if self.config.use_automatic_entropy_tuning:
-            self.optimizers["log_alpha"] = torch.optim.Adam(self.log_alpha.parameters(), lr=self.config.policy_lr)
+        self.optimizers["log_alpha"] = torch.optim.Adam(self.log_alpha.parameters(), lr=self.config.policy_lr)
         if self.config.cql_lagrange:
             self.optimizers["log_alpha_prime"] = torch.optim.Adam(self.log_alpha_prime.parameters(), lr=self.config.qf_lr)
 
@@ -317,8 +295,7 @@ class Trainer(object):
             if k in checkpoint['optimizers_state_dict']:
                 v.load_state_dict(checkpoint['optimizers_state_dict'][k])
         self._total_steps = checkpoint.get('total_steps', 0)
-        if self.config.use_automatic_entropy_tuning and 'log_alpha_state_dict' in checkpoint:
-            self.log_alpha.load_state_dict(checkpoint['log_alpha_state_dict'])
+        self.log_alpha.load_state_dict(checkpoint['log_alpha_state_dict'])
         if self.config.cql_lagrange and 'log_alpha_prime_state_dict' in checkpoint:
             self.log_alpha_prime.load_state_dict(checkpoint['log_alpha_prime_state_dict'])
         print(f"Loaded checkpoint from {filepath} at total steps {self._total_steps}")
@@ -349,8 +326,7 @@ class Trainer(object):
             'optimizers_state_dict': {k: v.state_dict() for k, v in self.optimizers.items()},
             'total_steps': self._total_steps,
         }
-        if self.config.use_automatic_entropy_tuning:
-            checkpoint['log_alpha_state_dict'] = self.log_alpha.state_dict()
+        checkpoint['log_alpha_state_dict'] = self.log_alpha.state_dict()
         if self.config.cql_lagrange:
             checkpoint['log_alpha_prime_state_dict'] = self.log_alpha_prime.state_dict()
         torch.save(checkpoint, filepath)

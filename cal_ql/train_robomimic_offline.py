@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from cal_ql.cal_ql_sac_trainer import Trainer
-from data.dataset import CalqlDataset
+from data.dataset import RoboMimicDataset
 from model.model import ResNetPolicy, ResNetQFunction
 from utils.logger import WandBLogger
 from utils.utils import Timer
@@ -45,7 +45,7 @@ def main(cfg: DictConfig):
         include_exp_prefix_sub_dir=False,
     )
     
-    dataset = CalqlDataset(cfg.dataset)
+    dataset = RoboMimicDataset(cfg.dataset)
     dataloader = DataLoader(
         dataset,
         batch_size=cfg.batch_size,
@@ -53,6 +53,7 @@ def main(cfg: DictConfig):
         num_workers=cfg.num_workers,
         pin_memory=True,
     )
+    cfg.cal_ql.bc_start_step = cfg.bc_start_epochs * len(dataloader)
     # data_iter = data_iter_fn(dataloader)
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
@@ -107,8 +108,6 @@ def main(cfg: DictConfig):
     viskit_metrics = {}
     # n_train_step_per_epoch = cfg.n_train_step_per_epoch_offline
     cql_min_q_weight = cfg.cql_min_q_weight
-    enable_calql = cfg.enable_calql
-    use_cql = cfg.use_cql
     total_grad_steps = 0
     train_timer = None
     epoch = 0
@@ -144,7 +143,7 @@ def main(cfg: DictConfig):
                 # batch = next(data_iter)
                 batch = dict_to_device(batch, device=device)
                 train_metrics = sac.train(
-                    batch, use_cql=use_cql, cql_min_q_weight=cql_min_q_weight, enable_calql=enable_calql
+                    batch, cql_min_q_weight=cql_min_q_weight
                 )
                 def post_process(metrics):
                     for k, v in metrics.items():

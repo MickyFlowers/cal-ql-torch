@@ -305,7 +305,7 @@ class DiffusionModel(nn.Module):
         # We will use trainable sin-cos embeddings
         # [timestep; state; action]
         self.x_pos_embed = nn.Parameter(
-            torch.zeros(1, horizon+3, hidden_size))
+            torch.zeros(1, horizon+2, hidden_size))
         # Image conditions
         self.img_cond_pos_embed = nn.Parameter(
             torch.zeros(1, img_cond_len, hidden_size))
@@ -408,7 +408,12 @@ class DiffusionPolicy(nn.Module):
         # A `state` refers to an action or a proprioception vector
         self.state_adaptor = self.build_condition_adapter(
             config.state_adaptor, 
-            in_features=state_token_dim * 2,    # state + state mask (indicator)
+            in_features=state_token_dim,
+            out_features=hidden_size
+        )
+        self.action_adaptor = self.build_condition_adapter(
+            config.action_adaptor, 
+            in_features=action_dim, 
             out_features=hidden_size
         )
         
@@ -434,9 +439,10 @@ class DiffusionPolicy(nn.Module):
         self.action_dim = action_dim
 
         print("Diffusion params: %e" % sum(
-            [p.numel() for p in self.model.parameters()] + 
-            [p.numel() for p in self.img_adaptor.parameters()] + 
-            [p.numel() for p in self.state_adaptor.parameters()]))
+            [p.numel() for p in self.model.parameters() if p.requires_grad] + 
+            [p.numel() for p in self.img_adaptor.parameters() if p.requires_grad] + 
+            [p.numel() for p in self.state_adaptor.parameters() if p.requires_grad] +
+            [p.numel() for p in self.action_adaptor.parameters() if p.requires_grad]))
     
     def build_condition_adapter(
         self, projector_type, in_features, out_features):
@@ -458,11 +464,13 @@ class DiffusionPolicy(nn.Module):
 
         return projector
     
-    def adapt_conditions(self, img_tokens, state_tokens):
+    def adapt_conditions(self, img_tokens, state_tokens, action_tokens=None):
 
         adpated_img = self.img_adaptor(img_tokens)
         adpated_state = self.state_adaptor(state_tokens)
-
+        if action_tokens is not None:
+            adpated_action = self.action_adaptor(action_tokens)
+            return adpated_img, adpated_state, adpated_action
         return adpated_img, adpated_state
 
     def conditional_sample(self, img_cond, state_traj):
@@ -480,7 +488,7 @@ class DiffusionPolicy(nn.Module):
         for t in self.noise_scheduler_sample.timesteps:
             # Prepare state-action trajectory
             action_traj = noisy_action
-            action_traj = self.state_adaptor(action_traj)
+            action_traj = self.action_adaptor(action_traj)
             state_action_traj = torch.cat([state_traj, action_traj], dim=1)
             
             # Predict the model output
@@ -499,8 +507,8 @@ class DiffusionPolicy(nn.Module):
         return noisy_action
     
     # ========= Train  ============
-    def compute_loss(self, img_tokens,state_tokens, action_gt) -> torch.Tensor:
-
+    def compute_loss(self, img_tokens, state_tokens, action_gt) -> torch.Tensor:
+        state_tokens = state_tokens.unsqueeze(1)
         batch_size = img_tokens.shape[0]
         device = img_tokens.device  
 
@@ -518,11 +526,11 @@ class DiffusionPolicy(nn.Module):
         noisy_action = self.noise_scheduler.add_noise(
             action_gt, noise, timesteps)
         
-        # Concatenate the state and action tokens to form the input sequence
-        state_action_traj = torch.cat([state_tokens, noisy_action], dim=1)
         # Align the dimension with the hidden size
-        img_cond, state_action_traj = self.adapt_conditions(
-            img_tokens, state_action_traj)
+        img_cond, state_traj, action_traj = self.adapt_conditions(
+            img_tokens, state_tokens, noisy_action)
+        
+        state_action_traj = torch.cat([state_traj, action_traj], dim=1)
         # Predict the denoised result
         pred = self.model(state_action_traj, timesteps, img_cond)
 
@@ -547,7 +555,7 @@ class DiffusionPolicy(nn.Module):
         return: (batch_size, horizon, action_dim), predicted action sequence
         '''
         # Prepare the state and conditions
-        state_tokens = torch.cat([state_tokens], dim=2)
+        state_tokens = state_tokens.unsqueeze(1)
         img_cond, state_traj = self.adapt_conditions(img_tokens, state_tokens)
         
         # Run sampling
