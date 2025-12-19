@@ -15,17 +15,17 @@ num_workers: 4
 
 # Architecture & policy hyperparameters
 hidden_dim: 256
-orthogonal_init: false
+orthogonal_init: true
 
 policy_obs_proj_arch: '256-256-256-256'
 policy_out_proj_arch: '256-256-256-256'
 policy_log_std_multiplier: 1.0
 policy_log_std_offset: -1.0
-train_policy_backbone: false
+train_policy_backbone: true
 
 q_obs_proj_arch: '256-256-256-256'
 q_out_proj_arch: '256-256-256-256'
-train_q_backbone: false
+train_q_backbone: true
 bc_start_epochs: 10
 
 
@@ -36,7 +36,7 @@ train_offline_epochs: 100
 cql_min_q_weight: 0.5
 torch_compile_mode: "max-autotune"
 
-save_every_n_epoch: 20
+save_every_n_epoch: 100
 ckpt_path: ./checkpoints
 load_ckpt_path: ""
 load_policy_ckpt_path: ""

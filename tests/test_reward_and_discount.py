@@ -1,5 +1,5 @@
-length = 1000
-discount = 0.999
+length = 100
+discount = 0.99
 step_reward = 0.0
 final_reward = 1.0
 fail_final_reward = step_reward

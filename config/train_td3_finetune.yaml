@@ -1,0 +1,38 @@
+defaults:
+  - td3bc: td3_online_defaults
+  - logging: logging_defaults
+  - dataset: dataset_defaults
+
+observation_dim: 12  # jnt_obs(6) + tcp_obs(6), adjust for your setup
+action_dim: 6
+
+seed: 42
+batch_size: 256
+num_workers: 4
+
+# Dataset type: 'calql' or 'robomimic'
+dataset_type: calql
+
+# Architecture & policy hyperparameters
+hidden_dim: 256
+orthogonal_init: false
+
+policy_obs_proj_arch: '256-256-256-256'
+policy_out_proj_arch: '256-256-256-256'
+train_policy_backbone: false
+
+q_obs_proj_arch: '256-256-256-256'
+q_out_proj_arch: '256-256-256-256'
+train_q_backbone: false
+
+# Training schedule
+train_epochs: 100
+
+# Checkpoint
+save_every_n_epoch: 20
+ckpt_path: ./checkpoints
+load_ckpt_path: ""  # Path to offline pretrained checkpoint
+load_optimizer: false  # Whether to load optimizer state from checkpoint
+
+discount: 0.99
+device: cuda:0

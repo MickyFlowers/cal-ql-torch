@@ -1,35 +1,33 @@
 defaults:
+  - td3bc: td3bc_defaults
   - logging: logging_defaults
   - dataset: dataset_defaults
 
-observation_dim: 12
-action_dim: 6
-
+observation_dim: 18
+action_dim: 7
 
 seed: 42
-batch_size: 32
+batch_size: 256
 num_workers: 4
-
 
 # Architecture & policy hyperparameters
 hidden_dim: 256
-orthogonal_init: true
+orthogonal_init: false
 
 policy_obs_proj_arch: '256-256-256-256'
 policy_out_proj_arch: '256-256-256-256'
-policy_log_std_multiplier: 1.0
-policy_log_std_offset: -1.0
 train_policy_backbone: false
 
+q_obs_proj_arch: '256-256-256-256'
+q_out_proj_arch: '256-256-256-256'
+train_q_backbone: false
 
-learning_rate: 3e-4
-train_bc_epochs: 100
-
-torch_compile_mode: "max-autotune"
+# Training schedule
+train_epochs: 100
 
 save_every_n_epoch: 20
 ckpt_path: ./checkpoints
 load_ckpt_path: ""
 
-device: cuda:0
 discount: 0.99
+device: cuda:0

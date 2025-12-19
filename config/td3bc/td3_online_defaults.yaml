@@ -1,0 +1,23 @@
+# TD3 Online Training Defaults
+# Pure TD3 without behavior cloning for online fine-tuning
+
+discount: ${discount}
+policy_lr: 1e-4  # Lower learning rate for fine-tuning
+qf_lr: 1e-4
+optimizer_type: adam
+weight_decay: 0.0
+
+tau: 0.005  # Target network soft update rate
+policy_noise: 0.2  # Noise added to target policy during critic update
+noise_clip: 0.5  # Range to clip target policy noise
+policy_freq: 2  # Frequency of delayed policy updates
+
+# Exploration noise for online interaction
+expl_noise: 0.1
+
+# Optional gradient clipping
+grad_clip: 1.0
+
+# Learning rate scheduler (optional)
+use_lr_scheduler: false
+lr_scheduler_steps: 100000

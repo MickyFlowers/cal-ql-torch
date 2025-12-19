@@ -4,6 +4,7 @@ import os
 import h5py
 import hydra
 import numpy as np
+import torch
 import torchvision.transforms as transforms
 import yaml
 from omegaconf import DictConfig
@@ -90,7 +91,16 @@ class CalqlDataset(Dataset):
         self.image_transform = transforms.Compose([
             transforms.Resize((config.image_resize, config.image_resize)),
             transforms.RandomCrop(config.image_size),
+            transforms.ColorJitter(
+                brightness=0.2,
+                contrast=0.2,
+                saturation=0.2,
+                hue=0.05
+            ),
             transforms.ToTensor(),
+            transforms.Lambda(
+                lambda x: x + 0.01 * torch.randn_like(x)
+            ),
             transforms.Normalize(                     
                 mean=[0.485, 0.456, 0.406],
                 std=[0.229, 0.224, 0.225]
@@ -218,7 +228,16 @@ class DiffusionPolicyDataset(Dataset):
         self.image_transform = transforms.Compose([
             transforms.Resize((config.image_resize, config.image_resize)),
             transforms.RandomCrop(config.image_size),
+            transforms.ColorJitter(
+                brightness=0.2,
+                contrast=0.2,
+                saturation=0.2,
+                hue=0.05
+            ),
             transforms.ToTensor(),
+            transforms.Lambda(
+                lambda x: x + 0.01 * torch.randn_like(x)
+            ),
             transforms.Normalize(                     
                 mean=[0.485, 0.456, 0.406],
                 std=[0.229, 0.224, 0.225]
@@ -300,7 +319,16 @@ class RoboMimicDataset(Dataset):
         self.image_transform = transforms.Compose([
             transforms.Resize((config.image_resize, config.image_resize)),
             transforms.RandomCrop(config.image_size),
+            transforms.ColorJitter(
+                brightness=0.2,
+                contrast=0.2,
+                saturation=0.2,
+                hue=0.05
+            ),
             transforms.ToTensor(),
+            transforms.Lambda(
+                lambda x: x + 0.01 * torch.randn_like(x)
+            ),
             transforms.Normalize(                     
                 mean=[0.485, 0.456, 0.406],
                 std=[0.229, 0.224, 0.225]

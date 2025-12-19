@@ -1,15 +1,9 @@
-
 import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
-from torch.distributions import Independent, Normal
-from torch.distributions.transformed_distribution import \
-    TransformedDistribution
-from torch.distributions.transforms import TanhTransform
 from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.nn.utils import clip_grad_norm_
 
 from model.model import Scaler
 
@@ -57,6 +51,16 @@ class Trainer(object):
 
         new_obs_actions, log_pi= self.policy(observations, images)
         info.update({'actor/log_pi_mean': log_pi.mean().item()})
+
+        # BC monitoring: log_prob of dataset actions
+        with torch.no_grad():
+            bc_log_prob = self.policy.log_prob(observations, images, actions)
+        info.update({
+            'actor/bc_log_prob_mean': bc_log_prob.mean().item(),
+            'actor/bc_log_prob_std': bc_log_prob.std().item(),
+            'actor/in_bc_phase': float(self._total_steps < self.config.bc_start_step),
+        })
+
         alpha_loss = -(self.log_alpha() * (log_pi + self.config.target_entropy).detach()).mean()
         info.update({'actor/alpha_loss': alpha_loss.item()})
         self.optimizers["log_alpha"].zero_grad()
@@ -111,6 +115,24 @@ class Trainer(object):
         q2_curr_actions = self._get_tensor_values(observations, images, curr_actions_tensor, network=self.qf['qf2'])
         q1_next_actions = self._get_tensor_values(observations, images, new_curr_actions_tensor, network=self.qf['qf1'])
         q2_next_actions = self._get_tensor_values(observations, images, new_curr_actions_tensor, network=self.qf['qf2'])
+
+        # Cal-QL: bound Q-values with MC return-to-go
+        # mc_returns shape: (B,) -> (B, N, 1) to match q values shape
+        lower_bounds = mc_returns.view(-1, 1, 1).expand_as(q1_curr_actions)
+
+        # Record bound rates before applying calibration (for debugging)
+        num_vals = q1_curr_actions.numel()
+        bound_rate_q1_curr = (q1_curr_actions < lower_bounds).sum().item() / num_vals
+        bound_rate_q2_curr = (q2_curr_actions < lower_bounds).sum().item() / num_vals
+        bound_rate_q1_next = (q1_next_actions < lower_bounds).sum().item() / num_vals
+        bound_rate_q2_next = (q2_next_actions < lower_bounds).sum().item() / num_vals
+
+        # Apply Cal-QL calibration: max(Q, V^π_β)
+        q1_curr_actions = torch.maximum(q1_curr_actions, lower_bounds)
+        q2_curr_actions = torch.maximum(q2_curr_actions, lower_bounds)
+        q1_next_actions = torch.maximum(q1_next_actions, lower_bounds)
+        q2_next_actions = torch.maximum(q2_next_actions, lower_bounds)
+
         info.update({
             'critic/cql_q1_rand_mean': q1_rand.mean().item(),
             'critic/cql_q2_rand_mean': q2_rand.mean().item(),
@@ -118,6 +140,11 @@ class Trainer(object):
             'critic/cql_q2_curr_actions_mean': q2_curr_actions.mean().item(),
             'critic/cql_q1_next_actions_mean': q1_next_actions.mean().item(),
             'critic/cql_q2_next_actions_mean': q2_next_actions.mean().item(),
+            'critic/calql_bound_rate_q1_curr': bound_rate_q1_curr,
+            'critic/calql_bound_rate_q2_curr': bound_rate_q2_curr,
+            'critic/calql_bound_rate_q1_next': bound_rate_q1_next,
+            'critic/calql_bound_rate_q2_next': bound_rate_q2_next,
+            'critic/mc_returns_mean': mc_returns.mean().item(),
         })
         cat_q1 = torch.cat(
             [q1_rand, q1_pred.unsqueeze(1), q1_next_actions, q1_curr_actions], 1
@@ -144,7 +171,7 @@ class Trainer(object):
             'critic/cql_logsumexp_loss_q1': min_qf1_loss.item(),
             'critic/cql_logsumexp_loss_q2': min_qf2_loss.item(),
         })
-        """Subtract the log likelihood of data"""
+        # Subtract the log likelihood of data (E_s~D,a~D [Q(s,a)])
         min_qf1_loss = min_qf1_loss - q1_pred.mean() * cql_min_q_weight
         min_qf2_loss = min_qf2_loss - q2_pred.mean() * cql_min_q_weight
         info.update({
@@ -173,62 +200,68 @@ class Trainer(object):
             'critic/total_qf2_loss': qf2_loss.item(),
         })
 
-        """
-        Update networks
-        """
-        # Update the Q-functions iff '
+        # Update policy network
         self.optimizers['policy'].zero_grad()
-        policy_loss.backward(retain_graph=False)
+        policy_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.policy.parameters(), self.config.max_grad_norm)
         self.optimizers['policy'].step()
 
+        # Update Q-functions
         self.optimizers['qf1'].zero_grad()
-        qf1_loss.backward(retain_graph=True)
-        self.optimizers['qf1'].step()
-
-        
         self.optimizers['qf2'].zero_grad()
-        qf2_loss.backward(retain_graph=True)
+        (qf1_loss + qf2_loss).backward()
+        torch.nn.utils.clip_grad_norm_(self.qf['qf1'].parameters(), self.config.max_grad_norm)
+        torch.nn.utils.clip_grad_norm_(self.qf['qf2'].parameters(), self.config.max_grad_norm)
+        self.optimizers['qf1'].step()
         self.optimizers['qf2'].step()
 
-        
+        # Soft update target networks
         if self._total_steps % self.config.target_update_interval == 0:
-            with torch.no_grad():
-                for target_param, param in zip(self.qf["target_qf1"].parameters(), self.qf["qf1"].parameters()):
-                    new_param = (1 - self.config.soft_target_update_rate) * target_param.data + self.config.soft_target_update_rate * param.data
-                    target_param.data.copy_(new_param)
-                for target_param, param in zip(self.qf["target_qf2"].parameters(), self.qf["qf2"].parameters()):
-                    new_param = (1 - self.config.soft_target_update_rate) * target_param.data + self.config.soft_target_update_rate * param.data
-                    target_param.data.copy_(new_param)
+            self._soft_update_target_networks()
+
         return info
 
+    @torch.no_grad()
+    def _soft_update_target_networks(self):
+        tau = self.config.soft_target_update_rate
+        for target_qf, qf in [('target_qf1', 'qf1'), ('target_qf2', 'qf2')]:
+            for target_param, param in zip(self.qf[target_qf].parameters(), self.qf[qf].parameters()):
+                target_param.data.lerp_(param.data, tau)
+
+    def _repeat_obs_images(self, obs, images, num_repeat):
+        """Repeat observations and images for multiple action samples."""
+        batch_size = obs.shape[0]
+        obs_expanded = obs.unsqueeze(1).expand(-1, num_repeat, -1).reshape(batch_size * num_repeat, -1)
+        images_expanded = images.unsqueeze(1).expand(-1, num_repeat, -1, -1, -1).reshape(
+            batch_size * num_repeat, *images.shape[1:]
+        )
+        return obs_expanded, images_expanded
+
     def _get_tensor_values(self, obs, images, actions, network=None):
+        """Get Q-values for given state-action pairs."""
         if hasattr(network, "evaluate_actions"):
             return network.evaluate_actions(obs, images, actions)
 
-        action_shape = actions.shape[0]
-        obs_shape = obs.shape[0]
-        num_repeat = int(action_shape / obs_shape)
-        obs_temp = obs.unsqueeze(1).repeat(1, num_repeat, 1).view(obs.shape[0] * num_repeat, obs.shape[1])
-        images_temp = images.unsqueeze(1).repeat(1, num_repeat, 1, 1, 1).view(images.shape[0] * num_repeat, images.shape[1], images.shape[2], images.shape[3])
-        preds = network(obs_temp, images_temp, actions)
-        preds = preds.view(obs.shape[0], num_repeat, 1)
-        return preds
+        batch_size = obs.shape[0]
+        num_repeat = actions.shape[0] // batch_size
+        obs_expanded, images_expanded = self._repeat_obs_images(obs, images, num_repeat)
+        preds = network(obs_expanded, images_expanded, actions)
+        return preds.view(batch_size, num_repeat, 1)
 
     def _get_policy_actions(self, obs, images, num_actions, network=None):
+        """Sample multiple actions from policy for each state."""
+        batch_size = obs.shape[0]
+
         if hasattr(network, "sample_actions"):
             actions, log_pi = network.sample_actions(obs, images, num_actions=num_actions, deterministic=False)
-            actions = actions.reshape(obs.shape[0] * num_actions, -1)
+            actions = actions.reshape(batch_size * num_actions, -1)
             if log_pi is None:
-                log_pi = torch.zeros(obs.shape[0], num_actions, device=obs.device)
-            return actions.detach(), log_pi.view(obs.shape[0], num_actions, 1).detach()
+                log_pi = torch.zeros(batch_size, num_actions, device=obs.device)
+            return actions.detach(), log_pi.view(batch_size, num_actions, 1).detach()
 
-        obs_temp = obs.unsqueeze(1).repeat(1, num_actions, 1).view(obs.shape[0] * num_actions, obs.shape[1])
-        images_temp = images.unsqueeze(1).repeat(1, num_actions, 1, 1, 1).view(images.shape[0] * num_actions, images.shape[1], images.shape[2], images.shape[3])  
-        new_obs_actions, new_obs_log_pi = network(
-            obs_temp, images_temp
-        )
-
-        return new_obs_actions.detach(), new_obs_log_pi.view(obs.shape[0], num_actions, 1).detach()
+        obs_expanded, images_expanded = self._repeat_obs_images(obs, images, num_actions)
+        actions, log_pi = network(obs_expanded, images_expanded)
+        return actions.detach(), log_pi.view(batch_size, num_actions, 1).detach()
     
     def to_device(self, device):
         self.device = device

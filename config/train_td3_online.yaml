@@ -1,0 +1,46 @@
+defaults:
+  - td3bc: td3_online_defaults
+  - logging: logging_defaults
+  - dataset: dataset_defaults
+  - env: env
+
+observation_dim: 12  # jnt_obs(6) + tcp_obs(6)
+action_dim: 6
+
+seed: 42
+batch_size: 256
+num_workers: 4
+
+# Architecture & policy hyperparameters
+hidden_dim: 256
+orthogonal_init: false
+
+policy_obs_proj_arch: '256-256-256-256'
+policy_out_proj_arch: '256-256-256-256'
+train_policy_backbone: false
+
+q_obs_proj_arch: '256-256-256-256'
+q_out_proj_arch: '256-256-256-256'
+train_q_backbone: false
+
+# Online training schedule
+n_online_epochs: 100
+n_env_steps_per_epoch: 1000  # Environment steps per epoch
+n_train_steps_per_epoch: 1000  # Gradient steps per epoch
+warmup_steps: 1000  # Random actions before using policy
+
+# Replay buffer
+replay_buffer_size: 100000
+offline_ratio: 0.5  # Ratio of offline data in training batches
+
+# Checkpoint
+save_every_n_epoch: 10
+ckpt_path: ./checkpoints
+load_ckpt_path: ""  # Path to offline pretrained checkpoint
+
+# Evaluation
+eval_every_n_epoch: 5
+n_eval_episodes: 10
+
+discount: 0.99
+device: cuda:0
