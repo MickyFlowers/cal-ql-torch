@@ -20,8 +20,8 @@ class Trainer(object):
         self.optimizers['qf1'] = optim.Adam(self.qf['qf1'].parameters(), lr=config.qf_lr)
         self.optimizers['qf2'] = optim.Adam(self.qf['qf2'].parameters(), lr=config.qf_lr)   
         
-        self.log_alpha = Scaler(1.0)
-        self.optimizers["log_alpha"] = optim.Adam(self.log_alpha.parameters(), lr=config.alpha_lr)
+        # For offline RL, use fixed alpha (no entropy tuning needed)
+        self.fixed_alpha = config.fixed_alpha
 
         
         self.log_alpha_prime = Scaler(self.config.alpha_prime)
@@ -29,7 +29,6 @@ class Trainer(object):
             
         self._total_steps = 0
         self._modules = [self.policy, self.qf['qf1'], self.qf['qf2'], self.qf['target_qf1'], self.qf['target_qf2']]
-        self._modules.append(self.log_alpha)
         self._modules.append(self.log_alpha_prime)
 
     def train(self, batch, cql_min_q_weight=5.0):
@@ -61,22 +60,9 @@ class Trainer(object):
             'actor/in_bc_phase': float(self._total_steps < self.config.bc_start_step),
         })
 
-        alpha_loss = -(self.log_alpha() * (log_pi + self.config.target_entropy).detach()).mean()
-        info.update({'actor/alpha_loss': alpha_loss.item()})
-        self.optimizers["log_alpha"].zero_grad()
-        alpha_loss.backward()
-        self.optimizers["log_alpha"].step()
-
-        # Clamp log_alpha to prevent alpha from going too low or too high
-        # This prevents phase transitions when alpha approaches 0
-        with torch.no_grad():
-            self.log_alpha.clamp_(min=-5.0, max=2.0)  # alpha in [0.0067, 7.39]
-
-        alpha = self.log_alpha().exp()
-        info.update({
-            'actor/alpha': alpha.item(),
-            'actor/log_alpha': self.log_alpha().item()
-        })
+        # Use fixed alpha for offline RL (no entropy tuning)
+        alpha = self.fixed_alpha
+        info.update({'actor/alpha': alpha})
 
         q_new_actions = torch.min(
             self.qf['qf1'](observations, images, new_obs_actions),
@@ -283,7 +269,6 @@ class Trainer(object):
         self.qf['qf2'].to(device)
         self.qf['target_qf1'].to(device)
         self.qf['target_qf2'].to(device)
-        self.log_alpha.to(device)
         if self.config.cql_lagrange:
             self.log_alpha_prime.to(device)
 
@@ -293,7 +278,6 @@ class Trainer(object):
         self.qf['qf2'] = torch.compile(self.qf['qf2'], mode=mode)
         self.qf['target_qf1'] = torch.compile(self.qf['target_qf1'], mode=mode)
         self.qf['target_qf2'] = torch.compile(self.qf['target_qf2'], mode=mode)
-        self.log_alpha = torch.compile(self.log_alpha, mode=mode)
         if self.config.cql_lagrange:
             self.log_alpha_prime = torch.compile(self.log_alpha_prime, mode=mode)
         
@@ -324,9 +308,8 @@ class Trainer(object):
             list(self.qf['qf1'].parameters()) + list(self.qf['qf2'].parameters()), lr=self.config.qf_lr
         )
         
-        self.optimizers["log_alpha"] = torch.optim.Adam(self.log_alpha.parameters(), lr=self.config.policy_lr)
         if self.config.cql_lagrange:
-            self.optimizers["log_alpha_prime"] = torch.optim.Adam(self.log_alpha_prime.parameters(), lr=self.config.qf_lr)
+            self.optimizers["log_alpha_prime"] = torch.optim.Adam(self.log_alpha_prime.parameters(), lr=self.config.alpha_prime_lr)
 
         print(f"[Rank {dist.get_rank()}] Trainer multi-GPU setup complete. Device: {device}")
         
@@ -341,7 +324,6 @@ class Trainer(object):
             if k in checkpoint['optimizers_state_dict']:
                 v.load_state_dict(checkpoint['optimizers_state_dict'][k])
         self._total_steps = checkpoint.get('total_steps', 0)
-        self.log_alpha.load_state_dict(checkpoint['log_alpha_state_dict'])
         if self.config.cql_lagrange and 'log_alpha_prime_state_dict' in checkpoint:
             self.log_alpha_prime.load_state_dict(checkpoint['log_alpha_prime_state_dict'])
         print(f"Loaded checkpoint from {filepath} at total steps {self._total_steps}")
@@ -372,7 +354,6 @@ class Trainer(object):
             'optimizers_state_dict': {k: v.state_dict() for k, v in self.optimizers.items()},
             'total_steps': self._total_steps,
         }
-        checkpoint['log_alpha_state_dict'] = self.log_alpha.state_dict()
         if self.config.cql_lagrange:
             checkpoint['log_alpha_prime_state_dict'] = self.log_alpha_prime.state_dict()
         torch.save(checkpoint, filepath)

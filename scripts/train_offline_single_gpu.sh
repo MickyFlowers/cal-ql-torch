@@ -9,7 +9,7 @@ nohup python -m cal_ql.train_offline_single_gpu \
     logging.prefix='offline' \
     cal_ql.qf_lr=3e-5 \
     cal_ql.policy_lr=1e-5 \
-    cal_ql.alpha_lr=1e-6 \
+    cal_ql.fixed_alpha=0.1 \
     cal_ql.alpha_prime_lr=1e-6 \
     batch_size=64 \
     num_workers=64 \
