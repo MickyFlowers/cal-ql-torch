@@ -170,9 +170,14 @@ class Scaler(nn.Module):
     def __init__(self, init_value):
         super().__init__()
         self.scaler = nn.Parameter(torch.tensor(init_value, dtype=torch.float32))
-    
+
     def forward(self):
         return self.scaler
+
+    def clamp_(self, min=None, max=None):
+        """In-place clamp the scaler value."""
+        with torch.no_grad():
+            self.scaler.clamp_(min=min, max=max)
 
 class ResNetPolicy(nn.Module):
     def __init__(

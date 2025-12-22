@@ -21,11 +21,11 @@ class Trainer(object):
         self.optimizers['qf2'] = optim.Adam(self.qf['qf2'].parameters(), lr=config.qf_lr)   
         
         self.log_alpha = Scaler(1.0)
-        self.optimizers["log_alpha"] = optim.Adam(self.log_alpha.parameters(), lr=config.policy_lr)
+        self.optimizers["log_alpha"] = optim.Adam(self.log_alpha.parameters(), lr=config.alpha_lr)
 
         
         self.log_alpha_prime = Scaler(self.config.alpha_prime)
-        self.optimizers["log_alpha_prime"] = optim.Adam(self.log_alpha_prime.parameters(), lr=config.qf_lr)
+        self.optimizers["log_alpha_prime"] = optim.Adam(self.log_alpha_prime.parameters(), lr=config.alpha_prime_lr)
             
         self._total_steps = 0
         self._modules = [self.policy, self.qf['qf1'], self.qf['qf2'], self.qf['target_qf1'], self.qf['target_qf2']]
@@ -66,6 +66,12 @@ class Trainer(object):
         self.optimizers["log_alpha"].zero_grad()
         alpha_loss.backward()
         self.optimizers["log_alpha"].step()
+
+        # Clamp log_alpha to prevent alpha from going too low or too high
+        # This prevents phase transitions when alpha approaches 0
+        with torch.no_grad():
+            self.log_alpha.clamp_(min=-5.0, max=2.0)  # alpha in [0.0067, 7.39]
+
         alpha = self.log_alpha().exp()
         info.update({
             'actor/alpha': alpha.item(),
@@ -178,7 +184,9 @@ class Trainer(object):
             'critic/cql_loss_q1_diff': min_qf1_loss.item(),
             'critic/cql_loss_q2_diff': min_qf2_loss.item(),
         })
-        alpha_prime = torch.clamp(self.log_alpha_prime().exp(), min=0.0, max=1000000.0)
+        # Clamp alpha_prime with a minimum to prevent phase transitions
+        # When alpha_prime approaches 0, CQL regularization disappears causing instability
+        alpha_prime = torch.clamp(self.log_alpha_prime().exp(), min=0.01, max=1000000.0)
         min_qf1_loss = alpha_prime * (min_qf1_loss - self.config.cql_target_action_gap)
         min_qf2_loss = alpha_prime * (min_qf2_loss - self.config.cql_target_action_gap)
         info.update({
@@ -189,10 +197,15 @@ class Trainer(object):
         })
 
         self.optimizers['log_alpha_prime'].zero_grad()
-        alpha_prime_loss = (-min_qf1_loss - min_qf2_loss)*0.5 
+        alpha_prime_loss = (-min_qf1_loss - min_qf2_loss)*0.5
         info.update({'critic/alpha_prime_loss': alpha_prime_loss.item()})
         alpha_prime_loss.backward(retain_graph=True)
         self.optimizers['log_alpha_prime'].step()
+
+        # Clamp log_alpha_prime to prevent alpha_prime from going too low
+        # This maintains a minimum CQL regularization strength
+        with torch.no_grad():
+            self.log_alpha_prime.clamp_(min=-4.6, max=15.0)  # alpha_prime in [0.01, ~3.3M]
         qf1_loss = qf1_loss + min_qf1_loss
         qf2_loss = qf2_loss + min_qf2_loss
         info.update({
