@@ -1,0 +1,43 @@
+# ACT (Action Chunking with Transformers) Policy Rollout Configuration
+
+defaults:
+  - env: env
+
+# Device
+device: cuda:0
+
+# Checkpoint
+ckpt_path: ./checkpoints/act_policy.pth
+statistics_path: ./dataset/statistics.yaml
+
+# Model architecture (must match training config)
+observation_dim: 12
+action_dim: 6
+hidden_dim: 512
+latent_dim: 32
+num_encoder_layers: 4
+num_decoder_layers: 4
+num_heads: 8
+chunk_size: 100
+dim_feedforward: 2048
+backbone_name: resnet18
+
+# Image processing
+image_resize: 256
+image_size: 224
+
+# Normalization
+proprio_norm_type: max_min
+action_norm_type: max_min
+
+# Temporal ensemble for smoother actions
+temporal_ensemble: true
+temporal_decay: 0.01
+
+# Rollout settings
+num_episodes: 10
+max_steps: 1000
+
+# Data saving
+save_data: false
+save_path: ./rollout_data/act
