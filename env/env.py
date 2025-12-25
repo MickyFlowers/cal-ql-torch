@@ -1,11 +1,13 @@
 import threading
 
+import cv2
 import gym
 import numpy as np
 import rospy
+from cv_bridge import CvBridge
 from geometry_msgs.msg import Twist, WrenchStamped
 from omegaconf import OmegaConf
-from sensor_msgs.msg import CompressedImage
+from sensor_msgs.msg import Image
 from std_msgs.msg import Int8MultiArray
 from xlib.algo.controller import AdmittanceController
 from xlib.algo.utils.image_utils import compressed_msg_to_bytes
@@ -27,6 +29,7 @@ class UrEnv(gym.Env):
         self.tcp_obs = None
         self.jnt_obs = None
         
+        self.cv_bridge = CvBridge()
         self.admittance_controller = AdmittanceController(
             config.M, config.D, config.K, config.threshold_high, config.threshold_low
         )
@@ -50,7 +53,7 @@ class UrEnv(gym.Env):
             rospy.init_node('ur_env_node', anonymous=True)
             
         rospy.Subscriber(config.ft_sensor_topic, WrenchStamped, self._ft_callback, queue_size=10)
-        rospy.Subscriber(config.camera_topic, CompressedImage, self._image_callback, queue_size=10)
+        rospy.Subscriber(config.camera_topic, Image, self._image_callback, queue_size=10)
         rospy.Subscriber(config.spacemouse_twist_topic, Twist, self._spacemouse_callback, queue_size=10)
         rospy.Subscriber(config.spacemouse_buttons_topic, Int8MultiArray, self._spacemouse_buttons_callback, queue_size=10)
         self.space_mouse_twist = None
@@ -86,8 +89,11 @@ class UrEnv(gym.Env):
     def _spin(self):
         rospy.spin()
     
-    def _image_callback(self, img_msg: CompressedImage):
-        self.img_obs = compressed_msg_to_bytes(img_msg)
+    def _image_callback(self, img_msg: Image):
+        cv_img = self.cv_bridge.imgmsg_to_cv2(img_msg, desired_encoding='bgr8')
+        cv_img = cv2.resize(cv_img, (self.config.image_size, self.config.image_size))
+        self.img_obs = cv2.imencode(".png", cv_img)[1].tobytes()
+        
             
     def _ft_callback(self, ft_msg: WrenchStamped):
         # ft value
@@ -180,12 +186,12 @@ class UrEnv(gym.Env):
         rospy.Rate(1).sleep()
         self.wait_for_obs()
         print("waiting for manully start...")
-        print("Press[y] continue")
-        while True:
-            key = self.keyboard_reader.get_key()
-            rospy.Rate(1).sleep()
-            if key == 'y':
-                break
+        # print("Press[y] continue")
+        # while True:
+        #     key = self.keyboard_reader.get_key()
+        #     rospy.Rate(1).sleep()
+        #     if key == 'y':
+        #         break
         print("Environment reset done.")
         self.running = True
     

@@ -22,7 +22,7 @@ def main(config):
         
         tar_pose = obs["tcp_obs"]
         saver = HDF5BlockSaver(config.save_path)
-        pbvs_controller = PBVS(gain=np.array([10.0] * 6))
+        pbvs_controller = PBVS(gain=np.array([5.0] * 6))
         
         env.reset()
         observation = env.get_observation()
@@ -34,18 +34,18 @@ def main(config):
             pbvs_controller.update(cur_pose, tar_pose)
             vel = pbvs_controller.calc_vel()
             print(vel)
-            next_pose = applyDeltaPose6d(cur_pose, vel * config.dt)
+            next_pose = applyDeltaPose6d(cur_pose, vel * 1.0 / config.freq)
             # step the environment
             env.action(next_pose)
             # record data
             record_data = {
                 "observations": observation,
-                "target_pose": next_pose,
+                "action": next_pose,
             }
             saver.add_frame(record_data)
             elapsed_time = time.time() - start_time
-            if elapsed_time < config.dt:
-                time.sleep(config.dt - elapsed_time)
+            if elapsed_time < 1.0 / config.freq:
+                time.sleep(1.0 / config.freq - elapsed_time)
             
         saver.save_episode()
         

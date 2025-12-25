@@ -1,5 +1,5 @@
 defaults:
   - env: env
 
-save_path: ./dataset/raw_data_251203
-dt: 0.01
+save_path: ./dataset/raw_data_251218
+freq: 30.0

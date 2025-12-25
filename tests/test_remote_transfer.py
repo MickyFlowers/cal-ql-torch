@@ -13,6 +13,7 @@ list_dir = remote_transfer.list_remote_dir("/mnt/pfs/datasets")
 remote_transfer.start_upload_process()
 # remote_transfer.upload_file("./tests/upload_file.txt", "/mnt/pfs/upload_file.txt", overwrite=True)
 # remote_transfer.upload_folder("./tests/", "/mnt/pfs/upload_tests/", overwrite=False)
+remote_transfer.upload_folder("/home/cyx/project/cal-ql-torch/dataset/processed_data_251218","/mnt/pfs/datasets/rl/processed_data_251218")
 remote_transfer.close()
 
 
