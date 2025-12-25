@@ -5,7 +5,7 @@ Rollout script for deploying ACT policy in the UR robot environment.
 Supports temporal ensemble for smoother action execution.
 """
 
-import os
+import time
 import traceback
 
 import gym
@@ -15,7 +15,6 @@ import torch
 import torchvision.transforms as transforms
 import yaml
 from xlib.algo.utils.image_utils import np_buffer_to_pil_image
-from xlib.data.hdf5_saver import HDF5BlockSaver
 
 import env
 from act.act_model import ACTPolicy, TemporalEnsemble
@@ -107,12 +106,6 @@ def main(config):
                 decay=config.temporal_decay,
             )
 
-        # Setup data saver if needed
-        saver = None
-        if config.save_data:
-            os.makedirs(config.save_path, exist_ok=True)
-            saver = HDF5BlockSaver(config.save_path, idx=0)
-
         episode_count = 0
         while episode_count < config.num_episodes:
             observation = env.reset()
@@ -127,6 +120,8 @@ def main(config):
             chunk_idx = 0
 
             while True:
+                start_time = time.time()
+
                 # Extract observations
                 jnt_obs = observation["jnt_obs"]
                 tcp_obs = observation["tcp_obs"]
@@ -172,26 +167,16 @@ def main(config):
                 # Step environment
                 next_observations, reward, done, info = env.step(action)
 
-                # Record data if saving
-                if saver is not None:
-                    record_data = {
-                        "observations": observation,
-                        "next_observations": next_observations,
-                        "actions": action,
-                        "rewards": reward,
-                        "dones": done,
-                        "info": info,
-                    }
-                    saver.add_frame(record_data)
-
                 observation = next_observations
                 step_count += 1
 
+                # Control execution frequency
+                elapsed_time = time.time() - start_time
+                if elapsed_time < 1.0 / config.freq:
+                    time.sleep(1.0 / config.freq - elapsed_time)
+
                 if done or step_count >= config.max_steps:
                     break
-
-            if saver is not None:
-                saver.save_episode()
 
             episode_count += 1
             print(f"Episode {episode_count}/{config.num_episodes} completed with {step_count} steps")
@@ -200,8 +185,6 @@ def main(config):
         traceback.print_exc()
     finally:
         env.close()
-        if saver is not None:
-            saver.stop()
 
 
 if __name__ == "__main__":

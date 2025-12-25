@@ -49,7 +49,4 @@ action_horizon_steps: 8
 # Rollout settings
 num_episodes: 10
 max_steps: 1000
-
-# Data saving
-save_data: false
-save_path: ./rollout_data/diffusion
+freq: 30  # Control loop frequency in Hz
