@@ -30,18 +30,17 @@ dp_config:
     clip_sample: False
 
   
-trainer: 
+trainer:
   learning_rate: 1e-4
   weight_decay: 0.01
   betas: [0.9, 0.999]
   adam_epsilon: 1e-8
+  max_grad_norm: 1.0
+  use_amp: false
 
-  lr_scheduler: constant
-  warmup_steps: 500
-  lr_num_cycles: 1
-  max_epochs: {max_epochs}
-  num_cycles: 1
-  lr_power: 1.0
+  lr_scheduler: cosine
+  warmup_ratio: 0.05
+  min_lr_ratio: 0.1
   policy_ema:
     update_after_step: 0
     inv_gamma: 1.0
@@ -57,7 +56,8 @@ trainer:
 
 max_epochs: 100
 seed: 42
-eval_every_n_epochs: 1
+eval_every_n_epochs: 10
+log_every_n_step: 100
 load_ckpt_path: ""
 ckpt_path: "./checkpoints"
 save_every_n_epoch: 10

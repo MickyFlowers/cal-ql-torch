@@ -125,7 +125,7 @@ class TanhGaussianPolicy(nn.Module):
         base_out = self.base_network(observations)
         mean, log_std = torch.split(base_out, self.action_dim, dim=-1)
         log_std = self.log_std_multiplier() * log_std + self.log_std_offset()
-        log_std = torch.clamp(log_std, -20.0, 2.0)
+        log_std = torch.clamp(log_std, -5.0, 0.5)  # std range [0.007, 1.65]
         std = torch.exp(log_std)
         
         dist = Normal(mean, std)
@@ -141,7 +141,7 @@ class TanhGaussianPolicy(nn.Module):
         base_out = self.base_network(observations)
         mean, log_std = torch.chunk(base_out, 2, dim=-1)
         log_std = self.log_std_multiplier() * log_std + self.log_std_offset()
-        log_std = torch.clamp(log_std, -20.0, 2.0)
+        log_std = torch.clamp(log_std, -5.0, 0.5)  # std range [0.007, 1.65]
         std = torch.exp(log_std)
         dist = Normal(mean, std)
         if deterministic:
@@ -250,7 +250,7 @@ class ResNetPolicy(nn.Module):
         base_out = self.out_proj(ft)
         mean, log_std = torch.chunk(base_out, 2, dim=-1)
         log_std = self.log_std_multiplier() * log_std + self.log_std_offset()
-        log_std = torch.clamp(log_std, -20.0, 2.0)
+        log_std = torch.clamp(log_std, -5.0, 0.5)  # std range [0.007, 1.65]
         std = torch.exp(log_std)
         log_prob = None
         if deterministic:
@@ -273,7 +273,7 @@ class ResNetPolicy(nn.Module):
         base_out = self.out_proj(base_ft)
         mean, log_std = torch.chunk(base_out, 2, dim=-1)
         log_std = self.log_std_multiplier() * log_std + self.log_std_offset()
-        log_std = torch.clamp(log_std, -20.0, 2.0)
+        log_std = torch.clamp(log_std, -5.0, 0.5)  # std range [0.007, 1.65]
         std = torch.exp(log_std)
         tanh_normal = TanhNormal(mean, std)
         if deterministic:
@@ -300,10 +300,11 @@ class ResNetPolicy(nn.Module):
         base_out = self.out_proj(ft)
         mean, log_std = torch.chunk(base_out, 2, dim=-1)
         log_std = self.log_std_multiplier() * log_std + self.log_std_offset()
-        log_std = torch.clamp(log_std, -20.0, 2.0)
+        log_std = torch.clamp(log_std, -5.0, 0.5)  # std range [0.007, 1.65]
         std = torch.exp(log_std)
         tanh_normal = TanhNormal(mean, std)
         log_prob = tanh_normal.log_prob(value=actions, pre_tanh_value=raw_actions)
+        log_prob = torch.clamp(log_prob, min=-100.0, max=10.0)  # clip for numerical stability
         return log_prob.sum(-1)
 
 

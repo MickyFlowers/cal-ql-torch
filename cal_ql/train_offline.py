@@ -101,8 +101,8 @@ def main(cfg: DictConfig):
     )
     qf['target_qf1'] = copy.deepcopy(qf['qf1'])
     qf['target_qf2'] = copy.deepcopy(qf['qf2'])
-    if cfg.cal_ql.target_entropy >= 0.0:
-        cfg.cal_ql.target_entropy = -np.prod((1, action_dim)).item()
+        
+    cfg.cal_ql.target_entropy = -np.prod((1, action_dim)).item()
 
     sac = Trainer(cfg.cal_ql, policy, qf)
     

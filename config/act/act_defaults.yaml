@@ -1,0 +1,27 @@
+# ACT (Action Chunking with Transformers) Default Configuration
+
+# Model architecture
+hidden_dim: 512
+latent_dim: 32
+num_encoder_layers: 4
+num_decoder_layers: 4
+num_heads: 8
+dim_feedforward: 2048
+chunk_size: 100
+
+# Vision backbone
+backbone_name: resnet18
+pretrained_backbone: true
+train_backbone: true
+
+# Training
+lr: 1e-5
+weight_decay: 1e-4
+kl_weight: 10.0
+max_grad_norm: 1.0
+use_amp: false
+num_epochs: 2000
+
+# Inference
+temporal_ensemble: true
+temporal_decay: 0.01

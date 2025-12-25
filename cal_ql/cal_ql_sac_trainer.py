@@ -1,11 +1,36 @@
+import math
 import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.optim as optim
+from torch.amp import autocast
+from torch.optim.lr_scheduler import LambdaLR
 from torch.nn.parallel import DistributedDataParallel as DDP
 
 from model.model import Scaler
+
+
+def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps, min_lr_ratio=0.1):
+    """
+    Create a schedule with linear warmup and cosine decay.
+
+    Args:
+        optimizer: The optimizer to schedule.
+        num_warmup_steps: Number of warmup steps.
+        num_training_steps: Total number of training steps.
+        min_lr_ratio: Minimum learning rate as a ratio of initial lr (default 0.1 = 10% of initial lr).
+    """
+    def lr_lambda(current_step):
+        if current_step < num_warmup_steps:
+            # Linear warmup
+            return float(current_step) / float(max(1, num_warmup_steps))
+        # Cosine decay to min_lr_ratio
+        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        cosine_decay = 0.5 * (1.0 + math.cos(math.pi * progress))
+        return min_lr_ratio + (1.0 - min_lr_ratio) * cosine_decay
+
+    return LambdaLR(optimizer, lr_lambda)
 
 
 class Trainer(object):
@@ -18,23 +43,73 @@ class Trainer(object):
         self.optimizers = {}
         self.optimizers["policy"] = optim.Adam(self.policy.parameters(), lr=config.policy_lr)
         self.optimizers['qf1'] = optim.Adam(self.qf['qf1'].parameters(), lr=config.qf_lr)
-        self.optimizers['qf2'] = optim.Adam(self.qf['qf2'].parameters(), lr=config.qf_lr)   
-        
-        self.log_alpha = Scaler(1.0)
-        self.optimizers["log_alpha"] = optim.Adam(self.log_alpha.parameters(), lr=config.alpha_lr)
+        self.optimizers['qf2'] = optim.Adam(self.qf['qf2'].parameters(), lr=config.qf_lr)
 
-        
+        # CQL Lagrange multiplier (no entropy regularization)
         self.log_alpha_prime = Scaler(self.config.alpha_prime)
         self.optimizers["log_alpha_prime"] = optim.Adam(self.log_alpha_prime.parameters(), lr=config.alpha_prime_lr)
             
         self._total_steps = 0
         self._modules = [self.policy, self.qf['qf1'], self.qf['qf2'], self.qf['target_qf1'], self.qf['target_qf2']]
-        self._modules.append(self.log_alpha)
         self._modules.append(self.log_alpha_prime)
+
+        # Learning rate schedulers (initialized later with setup_lr_scheduler)
+        self.schedulers = {}
+        self._use_scheduler = False
+
+    def setup_lr_scheduler(self, num_training_steps, warmup_ratio=0.05, min_lr_ratio=0.1):
+        """
+        Setup learning rate schedulers with warmup and cosine decay.
+
+        Args:
+            num_training_steps: Total number of training steps.
+            warmup_ratio: Ratio of warmup steps (default 5%).
+            min_lr_ratio: Minimum lr as ratio of initial lr (default 10%).
+        """
+        num_warmup_steps = int(num_training_steps * warmup_ratio)
+
+        self.schedulers['policy'] = get_cosine_schedule_with_warmup(
+            self.optimizers['policy'], num_warmup_steps, num_training_steps, min_lr_ratio
+        )
+        self.schedulers['qf1'] = get_cosine_schedule_with_warmup(
+            self.optimizers['qf1'], num_warmup_steps, num_training_steps, min_lr_ratio
+        )
+        self.schedulers['qf2'] = get_cosine_schedule_with_warmup(
+            self.optimizers['qf2'], num_warmup_steps, num_training_steps, min_lr_ratio
+        )
+        # alpha_prime uses constant lr (no scheduler)
+
+        self._use_scheduler = True
+        print(f"LR scheduler: {num_training_steps} total steps, {num_warmup_steps} warmup steps, min_lr_ratio={min_lr_ratio}")
+
+    def step_scheduler(self):
+        """Step all learning rate schedulers."""
+        if self._use_scheduler:
+            for scheduler in self.schedulers.values():
+                scheduler.step()
+
+    def get_lr(self):
+        """Get current learning rates."""
+        return {
+            'policy_lr': self.optimizers['policy'].param_groups[0]['lr'],
+            'qf_lr': self.optimizers['qf1'].param_groups[0]['lr'],
+        }
 
     def train(self, batch, cql_min_q_weight=5.0):
         self._total_steps += 1
         metrics = self._train_step(batch, cql_min_q_weight=cql_min_q_weight)
+
+        # Step schedulers after each training step
+        self.step_scheduler()
+
+        # Add learning rates to metrics
+        if self._use_scheduler:
+            lr_info = self.get_lr()
+            metrics.update({
+                'lr/policy': lr_info['policy_lr'],
+                'lr/qf': lr_info['qf_lr'],
+            })
+
         return metrics
 
     def _train_step(self, batch, cql_min_q_weight=5.0):
@@ -61,29 +136,40 @@ class Trainer(object):
             'actor/in_bc_phase': float(self._total_steps < self.config.bc_start_step),
         })
 
-        alpha_loss = -(self.log_alpha() * (log_pi + self.config.target_entropy).detach()).mean()
-        info.update({'actor/alpha_loss': alpha_loss.item()})
-        self.optimizers["log_alpha"].zero_grad()
-        alpha_loss.backward()
-        self.optimizers["log_alpha"].step()
+        # Policy loss with smooth BC -> RL transition
+        bc_end_step = self.config.bc_start_step
+        transition_steps = getattr(self.config, 'bc_transition_steps', 0)
+        transition_end = bc_end_step + transition_steps
+        bc_reg_weight = getattr(self.config, 'bc_regularization_weight', 0.0)
 
-        # Clamp log_alpha to prevent alpha from going too low or too high
-        # This prevents phase transitions when alpha approaches 0
-        with torch.no_grad():
-            self.log_alpha.clamp_(min=-5.0, max=2.0)  # alpha in [0.0067, 7.39]
+        # Compute BC weight for smooth transition
+        if self._total_steps < bc_end_step:
+            # Pure BC phase
+            bc_weight = 1.0
+        elif self._total_steps < transition_end and transition_steps > 0:
+            # Transition phase: linearly decrease bc_weight from 1.0 to bc_reg_weight
+            progress = (self._total_steps - bc_end_step) / transition_steps
+            bc_weight = 1.0 - progress * (1.0 - bc_reg_weight)
+        else:
+            # RL phase with BC regularization
+            bc_weight = bc_reg_weight
 
-        alpha = self.log_alpha().exp()
-        info.update({
-            'actor/alpha': alpha.item(),
-            'actor/log_alpha': self.log_alpha().item()
-        })
-
-        q_new_actions = torch.min(
+        # Compute both BC and Q objectives
+        bc_log_prob_loss = self.policy.log_prob(observations, images, actions)
+        q_value = torch.min(
             self.qf['qf1'](observations, images, new_obs_actions),
             self.qf['qf2'](observations, images, new_obs_actions),
-        ) if self._total_steps >= self.config.bc_start_step else self.policy.log_prob(observations, images, actions)
-        info.update({'actor/q_new_actions_mean': q_new_actions.mean().item()})
-        policy_loss = (alpha*log_pi - q_new_actions).mean()
+        )
+
+        # Blended policy objective: bc_weight * BC + (1 - bc_weight) * Q
+        q_new_actions = bc_weight * bc_log_prob_loss + (1.0 - bc_weight) * q_value
+
+        info.update({
+            'actor/q_new_actions_mean': q_new_actions.mean().item(),
+            'actor/bc_weight': bc_weight,
+            'actor/q_value_mean': q_value.mean().item(),
+        })
+        policy_loss = -q_new_actions.mean()
         info.update({'actor/policy_loss': policy_loss.item()})
 
         q1_pred = self.qf['qf1'](observations, images, actions)
@@ -184,28 +270,34 @@ class Trainer(object):
             'critic/cql_loss_q1_diff': min_qf1_loss.item(),
             'critic/cql_loss_q2_diff': min_qf2_loss.item(),
         })
-        # Clamp alpha_prime with a minimum to prevent phase transitions
-        # When alpha_prime approaches 0, CQL regularization disappears causing instability
-        alpha_prime = torch.clamp(self.log_alpha_prime().exp(), min=0.01, max=1000000.0)
+        # Get alpha_prime: either learnable (Lagrange) or fixed
+        if self.config.cql_lagrange:
+            # Learnable alpha_prime with clamping
+            alpha_prime = torch.clamp(self.log_alpha_prime().exp(), min=0.01, max=1000000.0)
+        else:
+            # Fixed alpha_prime from config
+            alpha_prime = torch.tensor(self.config.alpha_prime, device=self.device)
+
         min_qf1_loss = alpha_prime * (min_qf1_loss - self.config.cql_target_action_gap)
         min_qf2_loss = alpha_prime * (min_qf2_loss - self.config.cql_target_action_gap)
         info.update({
             'critic/cql_min_qf1_loss_final': min_qf1_loss.item(),
             'critic/cql_min_qf2_loss_final': min_qf2_loss.item(),
             'critic/alpha_prime': alpha_prime.item(),
-            'critic/log_alpha_prime': self.log_alpha_prime().item(),
         })
 
-        self.optimizers['log_alpha_prime'].zero_grad()
-        alpha_prime_loss = (-min_qf1_loss - min_qf2_loss)*0.5
-        info.update({'critic/alpha_prime_loss': alpha_prime_loss.item()})
-        alpha_prime_loss.backward(retain_graph=True)
-        self.optimizers['log_alpha_prime'].step()
+        # Only update alpha_prime when using Lagrange formulation
+        if self.config.cql_lagrange:
+            info.update({'critic/log_alpha_prime': self.log_alpha_prime().item()})
+            self.optimizers['log_alpha_prime'].zero_grad()
+            alpha_prime_loss = (-min_qf1_loss - min_qf2_loss) * 0.5
+            info.update({'critic/alpha_prime_loss': alpha_prime_loss.item()})
+            alpha_prime_loss.backward(retain_graph=True)
+            self.optimizers['log_alpha_prime'].step()
 
-        # Clamp log_alpha_prime to prevent alpha_prime from going too low
-        # This maintains a minimum CQL regularization strength
-        with torch.no_grad():
-            self.log_alpha_prime.clamp_(min=-4.6, max=15.0)  # alpha_prime in [0.01, ~3.3M]
+            # Clamp log_alpha_prime to prevent alpha_prime from going too low
+            with torch.no_grad():
+                self.log_alpha_prime.clamp_(min=-4.6, max=15.0)  # alpha_prime in [0.01, ~3.3M]
         qf1_loss = qf1_loss + min_qf1_loss
         qf2_loss = qf2_loss + min_qf2_loss
         info.update({
@@ -283,19 +375,21 @@ class Trainer(object):
         self.qf['qf2'].to(device)
         self.qf['target_qf1'].to(device)
         self.qf['target_qf2'].to(device)
-        self.log_alpha.to(device)
         if self.config.cql_lagrange:
             self.log_alpha_prime.to(device)
 
     def compile(self, mode="default"):
+        if mode == "disable":
+            print("torch.compile disabled")
+            return
         self.policy = torch.compile(self.policy, mode=mode)
         self.qf['qf1'] = torch.compile(self.qf['qf1'], mode=mode)
         self.qf['qf2'] = torch.compile(self.qf['qf2'], mode=mode)
         self.qf['target_qf1'] = torch.compile(self.qf['target_qf1'], mode=mode)
         self.qf['target_qf2'] = torch.compile(self.qf['target_qf2'], mode=mode)
-        self.log_alpha = torch.compile(self.log_alpha, mode=mode)
         if self.config.cql_lagrange:
             self.log_alpha_prime = torch.compile(self.log_alpha_prime, mode=mode)
+        print(f"Compiled models with mode={mode}")
         
     
     @property
@@ -323,10 +417,8 @@ class Trainer(object):
         self.optimizers["qf"] = torch.optim.Adam(
             list(self.qf['qf1'].parameters()) + list(self.qf['qf2'].parameters()), lr=self.config.qf_lr
         )
-        
-        self.optimizers["log_alpha"] = torch.optim.Adam(self.log_alpha.parameters(), lr=self.config.policy_lr)
         if self.config.cql_lagrange:
-            self.optimizers["log_alpha_prime"] = torch.optim.Adam(self.log_alpha_prime.parameters(), lr=self.config.qf_lr)
+            self.optimizers["log_alpha_prime"] = torch.optim.Adam(self.log_alpha_prime.parameters(), lr=self.config.alpha_prime_lr)
 
         print(f"[Rank {dist.get_rank()}] Trainer multi-GPU setup complete. Device: {device}")
         
@@ -341,9 +433,13 @@ class Trainer(object):
             if k in checkpoint['optimizers_state_dict']:
                 v.load_state_dict(checkpoint['optimizers_state_dict'][k])
         self._total_steps = checkpoint.get('total_steps', 0)
-        self.log_alpha.load_state_dict(checkpoint['log_alpha_state_dict'])
         if self.config.cql_lagrange and 'log_alpha_prime_state_dict' in checkpoint:
             self.log_alpha_prime.load_state_dict(checkpoint['log_alpha_prime_state_dict'])
+        # Load scheduler states if available
+        if 'schedulers_state_dict' in checkpoint and self._use_scheduler:
+            for k, v in self.schedulers.items():
+                if k in checkpoint['schedulers_state_dict']:
+                    v.load_state_dict(checkpoint['schedulers_state_dict'][k])
         print(f"Loaded checkpoint from {filepath} at total steps {self._total_steps}")
     def load_policy_checkpoint(self, filepath):
         checkpoint = torch.load(filepath, map_location=self.device)
@@ -372,7 +468,9 @@ class Trainer(object):
             'optimizers_state_dict': {k: v.state_dict() for k, v in self.optimizers.items()},
             'total_steps': self._total_steps,
         }
-        checkpoint['log_alpha_state_dict'] = self.log_alpha.state_dict()
         if self.config.cql_lagrange:
             checkpoint['log_alpha_prime_state_dict'] = self.log_alpha_prime.state_dict()
+        # Save scheduler states
+        if self._use_scheduler:
+            checkpoint['schedulers_state_dict'] = {k: v.state_dict() for k, v in self.schedulers.items()}
         torch.save(checkpoint, filepath)

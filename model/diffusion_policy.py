@@ -508,7 +508,9 @@ class DiffusionPolicy(nn.Module):
     
     # ========= Train  ============
     def compute_loss(self, img_tokens, state_tokens, action_gt) -> torch.Tensor:
-        state_tokens = state_tokens.unsqueeze(1)
+        # Ensure state_tokens is 3D: (B, 1, D)
+        if state_tokens.dim() == 2:
+            state_tokens = state_tokens.unsqueeze(1)
         batch_size = img_tokens.shape[0]
         device = img_tokens.device  
 
@@ -549,13 +551,13 @@ class DiffusionPolicy(nn.Module):
     def predict_action(self, img_tokens, state_tokens):
         '''
         img_tokens: (batch_size, img_len, img_token_dim)
-        state_tokens: (batch_size, 1, state_token_dim)
-    
-        
+        state_tokens: (batch_size, state_token_dim) or (batch_size, 1, state_token_dim)
+
         return: (batch_size, horizon, action_dim), predicted action sequence
         '''
-        # Prepare the state and conditions
-        state_tokens = state_tokens.unsqueeze(1)
+        # Ensure state_tokens is 3D: (B, 1, D)
+        if state_tokens.dim() == 2:
+            state_tokens = state_tokens.unsqueeze(1)
         img_cond, state_traj = self.adapt_conditions(img_tokens, state_tokens)
         
         # Run sampling

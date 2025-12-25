@@ -54,6 +54,7 @@ def main(cfg: DictConfig):
         pin_memory=True,
     )
     cfg.cal_ql.bc_start_step = cfg.bc_start_epochs * len(dataloader)
+    cfg.cal_ql.bc_transition_steps = getattr(cfg, 'bc_transition_epochs', 10) * len(dataloader)
     # data_iter = data_iter_fn(dataloader)
     np.random.seed(cfg.seed)
     torch.manual_seed(cfg.seed)
@@ -94,12 +95,21 @@ def main(cfg: DictConfig):
     )
     qf['target_qf1'] = copy.deepcopy(qf['qf1'])
     qf['target_qf2'] = copy.deepcopy(qf['qf2'])
-    if cfg.cal_ql.target_entropy >= 0.0:
-        cfg.cal_ql.target_entropy = -np.prod((1, action_dim)).item()
+    
+    cfg.cal_ql.target_entropy = -np.prod((1, action_dim)).item()
 
     sac = Trainer(cfg.cal_ql, policy, qf)
     # sac.setup_multi_gpu(local_rank)
     sac.to_device(device=device)
+    sac.compile(mode=cfg.torch_compile_mode)
+
+    # Setup learning rate scheduler
+    num_training_steps = cfg.train_offline_epochs * len(dataloader)
+    warmup_ratio = getattr(cfg, 'warmup_ratio', 0.05)
+    min_lr_ratio = getattr(cfg, 'min_lr_ratio', 0.1)
+    if getattr(cfg, 'use_lr_scheduler', True):
+        sac.setup_lr_scheduler(num_training_steps, warmup_ratio=warmup_ratio, min_lr_ratio=min_lr_ratio)
+
     if cfg.load_ckpt_path != "":
         sac.load_checkpoint(cfg.load_ckpt_path)
     # print("compiling sac model...")
@@ -138,21 +148,25 @@ def main(cfg: DictConfig):
             break
 
         with Timer() as train_timer:
+            # Accumulate metrics over the entire epoch
+            epoch_metrics = {}
+            num_batches = 0
             for batch in tqdm(dataloader, desc="Training"):
-            # for _ in tqdm(range(n_train_step_per_epoch), desc="Training"):
-                # batch = next(data_iter)
                 batch = dict_to_device(batch, device=device)
-                train_metrics = sac.train(
+                batch_metrics = sac.train(
                     batch, cql_min_q_weight=cql_min_q_weight
                 )
-                def post_process(metrics):
-                    for k, v in metrics.items():
-                        if isinstance(v, torch.Tensor):
-                            metrics[k] = v.detach().item()
-                    return metrics
-                train_metrics = post_process(train_metrics)
-                
+                # Accumulate metrics
+                for k, v in batch_metrics.items():
+                    if isinstance(v, torch.Tensor):
+                        v = v.detach().item()
+                    if k not in epoch_metrics:
+                        epoch_metrics[k] = 0.0
+                    epoch_metrics[k] += v
+                num_batches += 1
 
+            # Compute epoch average
+            train_metrics = {k: v / num_batches for k, v in epoch_metrics.items()}
             total_grad_steps += len(dataloader)
         epoch += 1
 

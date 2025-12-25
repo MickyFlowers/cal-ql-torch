@@ -109,17 +109,23 @@ def main(cfg: DictConfig):
             break
 
         with Timer() as train_timer:
+            # Accumulate metrics over the entire epoch
+            epoch_metrics = {}
+            num_batches = 0
             for batch in tqdm(dataloader, desc="Training"):
-            # for _ in tqdm(range(n_train_step_per_epoch), desc="Training"):
-                # batch = next(data_iter)
                 batch = dict_to_device(batch, device=device)
-                train_metrics = bc.train(batch)
-                def post_process(metrics):
-                    for k, v in metrics.items():
-                        if isinstance(v, torch.Tensor):
-                            metrics[k] = v.detach().item()
-                    return metrics
-                train_metrics = post_process(train_metrics)
+                batch_metrics = bc.train(batch)
+                # Accumulate metrics
+                for k, v in batch_metrics.items():
+                    if isinstance(v, torch.Tensor):
+                        v = v.detach().item()
+                    if k not in epoch_metrics:
+                        epoch_metrics[k] = 0.0
+                    epoch_metrics[k] += v
+                num_batches += 1
+
+            # Compute epoch average
+            train_metrics = {k: v / num_batches for k, v in epoch_metrics.items()}
             total_grad_steps += len(dataloader)
         epoch += 1
 

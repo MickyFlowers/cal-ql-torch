@@ -20,7 +20,7 @@ policy_arch: '256-256'
 qf_arch: '256-256-256-256'
 orthogonal_init: true
 policy_log_std_multiplier: 1.0
-policy_log_std_offset: -1.0
+policy_log_std_offset: -2.0
 
 # Offline pretraining / online finetuning schedule
 n_train_step_per_epoch_offline: 1000

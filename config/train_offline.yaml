@@ -27,10 +27,16 @@ q_obs_proj_arch: '256-256-256-256'
 q_out_proj_arch: '256-256-256-256'
 train_q_backbone: true
 bc_start_epochs: 10
+bc_transition_epochs: 10  # Number of epochs for BC->RL transition
 
 
 # Offline pretraining / online finetuning schedule
 train_offline_epochs: 100
+
+# Learning rate scheduler
+use_lr_scheduler: true
+warmup_ratio: 0.05  # 5% of total steps for warmup
+min_lr_ratio: 0.1   # decay to 10% of initial lr
 
 # CQL related toggles
 cql_min_q_weight: 0.5
