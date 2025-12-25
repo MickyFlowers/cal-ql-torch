@@ -22,10 +22,15 @@ from act.act_model import ACTPolicy, TemporalEnsemble
 
 
 def normalize(data, statistics, norm_type, epsilon=1e-6):
+    """Normalize data to [-1, 1] range (max_min) or zero mean unit variance (mean_std).
+
+    Must match the normalization in data/dataset.py for training consistency.
+    """
     if norm_type == 'max_min':
         data_max = np.array(statistics['max']) + epsilon
         data_min = np.array(statistics['min']) - epsilon
-        data = (data - data_min) / (data_max - data_min)
+        # Normalize to [-1, 1] range - matches training dataset
+        data = ((data - data_min) / (data_max - data_min) * 2.0) - 1.0
     elif norm_type == 'mean_std':
         data_mean = np.array(statistics['mean'])
         data_std = np.array(statistics['std'])
@@ -34,10 +39,15 @@ def normalize(data, statistics, norm_type, epsilon=1e-6):
 
 
 def denormalize(data, statistics, norm_type, epsilon=1e-6):
+    """Denormalize data from [-1, 1] range (max_min) or standardized (mean_std).
+
+    Inverse of normalize() function.
+    """
     if norm_type == 'max_min':
         data_max = np.array(statistics['max']) + epsilon
         data_min = np.array(statistics['min']) - epsilon
-        data = data * (data_max - data_min) + data_min
+        # Denormalize from [-1, 1] range - inverse of training normalization
+        data = (data + 1.0) / 2.0 * (data_max - data_min) + data_min
     elif norm_type == 'mean_std':
         data_mean = np.array(statistics['mean'])
         data_std = np.array(statistics['std'])

@@ -11,7 +11,6 @@ import traceback
 import gym
 import hydra
 import numpy as np
-import timm
 import torch
 import torchvision.transforms as transforms
 import yaml
@@ -20,13 +19,19 @@ from xlib.data.hdf5_saver import HDF5BlockSaver
 
 import env
 from model.diffusion_policy import DiffusionPolicy
+from model.vision_model import VitFeatureExtractor
 
 
 def normalize(data, statistics, norm_type, epsilon=1e-6):
+    """Normalize data to [-1, 1] range (max_min) or zero mean unit variance (mean_std).
+
+    Must match the normalization in data/dataset.py for training consistency.
+    """
     if norm_type == 'max_min':
         data_max = np.array(statistics['max']) + epsilon
         data_min = np.array(statistics['min']) - epsilon
-        data = (data - data_min) / (data_max - data_min)
+        # Normalize to [-1, 1] range - matches training dataset
+        data = ((data - data_min) / (data_max - data_min) * 2.0) - 1.0
     elif norm_type == 'mean_std':
         data_mean = np.array(statistics['mean'])
         data_std = np.array(statistics['std'])
@@ -35,32 +40,20 @@ def normalize(data, statistics, norm_type, epsilon=1e-6):
 
 
 def denormalize(data, statistics, norm_type, epsilon=1e-6):
+    """Denormalize data from [-1, 1] range (max_min) or standardized (mean_std).
+
+    Inverse of normalize() function.
+    """
     if norm_type == 'max_min':
         data_max = np.array(statistics['max']) + epsilon
         data_min = np.array(statistics['min']) - epsilon
-        data = data * (data_max - data_min) + data_min
+        # Denormalize from [-1, 1] range - inverse of training normalization
+        data = (data + 1.0) / 2.0 * (data_max - data_min) + data_min
     elif norm_type == 'mean_std':
         data_mean = np.array(statistics['mean'])
         data_std = np.array(statistics['std'])
         data = data * data_std + data_mean
     return data
-
-
-def create_vision_encoder(model_name, device, trainable_layers=None):
-    """Create vision encoder using timm."""
-    vision_encoder = timm.create_model(
-        model_name,
-        pretrained=True,
-        num_classes=0,  # Remove classification head
-    )
-    vision_encoder.to(device)
-    vision_encoder.eval()
-
-    # Freeze all parameters for inference
-    for param in vision_encoder.parameters():
-        param.requires_grad = False
-
-    return vision_encoder
 
 
 @hydra.main(config_path="../config", config_name="rollout_diffusion", version_base=None)
@@ -82,18 +75,24 @@ def main(config):
         print(f"Loading checkpoint from {ckpt_path}")
         ckpt_state_dict = torch.load(ckpt_path, map_location=config.device)
 
-        # Create vision encoder
-        vision_encoder = create_vision_encoder(
-            config.model_name,
-            config.device,
+        # Determine dtype
+        dtype = torch.bfloat16 if config.use_bf16 else torch.float32
+
+        # Create vision encoder using VitFeatureExtractor (same as training)
+        vision_encoder = VitFeatureExtractor(
+            model_name=config.model_name,
+            pretrained=True,
+            trainable_layers=None,  # All frozen for inference
+            dtype=dtype,
         )
+        vision_encoder.to(config.device)
 
         # Load vision encoder weights (prefer EMA if available)
         if "vision_encoder_ema_state_dict" in ckpt_state_dict:
-            vision_encoder.load_state_dict(ckpt_state_dict["vision_encoder_ema_state_dict"])
+            vision_encoder.model.load_state_dict(ckpt_state_dict["vision_encoder_ema_state_dict"])
             print("Loaded vision encoder EMA weights")
         elif "vision_encoder_state_dict" in ckpt_state_dict:
-            vision_encoder.load_state_dict(ckpt_state_dict["vision_encoder_state_dict"])
+            vision_encoder.model.load_state_dict(ckpt_state_dict["vision_encoder_state_dict"])
             print("Loaded vision encoder weights")
         vision_encoder.eval()
 
@@ -106,7 +105,7 @@ def main(config):
             state_token_dim=config.state_token_dim,
             img_cond_len=config.img_cond_len,
             img_pos_embed_config=config.img_pos_embed_config,
-            dtype=torch.bfloat16 if config.use_bf16 else torch.float32,
+            dtype=dtype,
         )
         policy.to(device=config.device)
 
@@ -160,20 +159,9 @@ def main(config):
                     # Predict new action horizon when buffer is empty or depleted
                     if action_horizon is None or horizon_idx >= config.action_horizon_steps:
                         # Get image embeddings from vision encoder
-                        if config.use_bf16:
-                            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                                img_features = vision_encoder.forward_features(image)
-                                # Extract patch tokens (exclude CLS token if present)
-                                if hasattr(vision_encoder, 'num_prefix_tokens'):
-                                    img_tokens = img_features[:, vision_encoder.num_prefix_tokens:]
-                                else:
-                                    img_tokens = img_features
-                        else:
-                            img_features = vision_encoder.forward_features(image)
-                            if hasattr(vision_encoder, 'num_prefix_tokens'):
-                                img_tokens = img_features[:, vision_encoder.num_prefix_tokens:]
-                            else:
-                                img_tokens = img_features
+                        # VitFeatureExtractor returns (cls_token, patch_tokens)
+                        # Training uses patch_tokens (index [1])
+                        _, img_tokens = vision_encoder(image)
 
                         # Predict action sequence
                         action_pred = policy.predict_action(img_tokens, proprio_tensor)
