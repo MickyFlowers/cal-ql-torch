@@ -1,7 +1,8 @@
 """
-BC (Behavior Cloning) Policy Rollout
+BC (Behavior Cloning) Policy Rollout with Velocity Control
 
 Rollout script for deploying BC policy (ResNetPolicy) in the UR robot environment.
+The policy outputs velocity commands directly.
 """
 
 import time
@@ -93,8 +94,6 @@ def main(config):
         with open(config.statistics_path, 'r') as f:
             statistics = yaml.safe_load(f)
 
-        
-        
         env.reset()
         step_count = 0
         while True:
@@ -116,16 +115,16 @@ def main(config):
             image = np_buffer_to_pil_image(np.frombuffer(image_bytes, dtype=np.uint8))
             image = image_transform(image).unsqueeze(0).to(device=config.device)
 
-            # Get action from policy
+            # Get velocity action from policy
             with torch.no_grad():
-                action, _ = policy(proprio_tensor, image, deterministic=True)
-                action = action.squeeze(0).cpu().numpy()
+                velocity, _ = policy(proprio_tensor, image, deterministic=True)
+                velocity = velocity.squeeze(0).cpu().numpy()
 
-            # Denormalize action
-            action = denormalize(action, statistics['action'], config.action_norm_type)
+            # Denormalize velocity
+            velocity = denormalize(velocity, statistics['action'], config.action_norm_type)
 
-            # Step environment
-            env.action(action)
+            # Execute velocity command
+            env.action(velocity)
 
             step_count += 1
 
@@ -136,8 +135,6 @@ def main(config):
 
             if step_count >= config.max_steps:
                 break
-
-            
 
     except Exception as e:
         traceback.print_exc()

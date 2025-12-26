@@ -1,21 +1,19 @@
-import multiprocessing as mp
-import os
+"""
+Teleoperation Data Collection with Velocity Control
+
+Collects demonstration data using SpaceMouse for velocity-based control.
+Records observations and velocity actions for training BC/ACT/Diffusion policies.
+"""
+
 import time
 import traceback
 
 import gym
 import hydra
 import numpy as np
-import torch
-import torchvision.transforms as transforms
-import yaml
-from xlib.algo.utils.image_utils import np_buffer_to_pil_image
-from xlib.algo.utils.transforms import applyDeltaPose6d
 from xlib.data.hdf5_saver import HDF5BlockSaver
-from xlib.data.remote_transfer import RemoteTransfer
 
 import env
-from model.model import ResNetPolicy
 
 
 @hydra.main(config_path="../config", config_name="teleop", version_base=None)
@@ -28,34 +26,44 @@ def main(config):
             env.reset()
             start_recording = False
             while True:
+                start_time = time.time()
                 observation = env.get_observation()
+                # Get velocity command from SpaceMouse
                 space_mouse_twist, enable_teleop = env.get_space_mouse_state()
+
                 if enable_teleop:
                     start_recording = True
-                    target_pose = env.get_target_pose()
-                    delta_pose = space_mouse_twist * 0.01 * config.env.teleop_twist_scale  # Scale down the twist for teleoperation
-                    next_pose = applyDeltaPose6d(target_pose, delta_pose)
-                    env.action(next_pose)
+                    # Scale the velocity for teleoperation
+                    velocity = space_mouse_twist * config.env.teleop_twist_scale
+                    # Execute velocity command
+                    env.action(velocity)
+
+                    # Record data: observations and velocity action
                     record_data = {
                         "observations": observation,
-                        "next_observations": next_pose,
+                        "action": velocity,  # Now action is velocity
                     }
                     saver.add_frame(record_data)
+
                 if start_recording and not enable_teleop:
                     break
+
+                # Control frequency
+                elapsed_time = time.time() - start_time
+                if elapsed_time < 1.0 / config.freq:
+                    time.sleep(1.0 / config.freq - elapsed_time)
+
             saver.save_episode()
-            num_episodes += 1
             count += 1
-        
+            print(f"Episode {count} saved.")
+
     except Exception as e:
         traceback.print_exc()
         env.close()
         saver.stop()
-        
+
     env.close()
-        
-    # print("Initial Observation:", observation)
-    
+
 
 if __name__ == "__main__":
-    main()    
+    main()

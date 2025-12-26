@@ -1,8 +1,9 @@
 """
-ACT (Action Chunking with Transformers) Policy Rollout
+ACT (Action Chunking with Transformers) Policy Rollout with Velocity Control
 
 Rollout script for deploying ACT policy in the UR robot environment.
-Supports temporal ensemble for smoother action execution.
+Supports temporal ensemble for smoother velocity execution.
+The policy outputs velocity commands directly.
 """
 
 import time
@@ -113,8 +114,8 @@ def main(config):
         if temporal_ensemble is not None:
             temporal_ensemble.reset()
 
-        # Action chunk buffer for non-ensemble mode
-        action_chunk = None
+        # Velocity chunk buffer for non-ensemble mode
+        velocity_chunk = None
         chunk_idx = 0
 
         while True:
@@ -136,35 +137,35 @@ def main(config):
             image = np_buffer_to_pil_image(np.frombuffer(image_bytes, dtype=np.uint8))
             image = image_transform(image).unsqueeze(0).to(device=config.device)
 
-            # Get action from policy
+            # Get velocity from policy
             with torch.no_grad():
                 if temporal_ensemble is not None:
-                    # Use temporal ensemble for smooth action execution
-                    action = policy.get_action(
+                    # Use temporal ensemble for smooth velocity execution
+                    velocity = policy.get_action(
                         proprio_tensor, image, temporal_ensemble
                     )
-                    print(action)
-                    if action.dim() == 1:
-                        action = action.cpu().numpy()
+                    print(velocity)
+                    if velocity.dim() == 1:
+                        velocity = velocity.cpu().numpy()
                     else:
-                        action = action[0].cpu().numpy()
+                        velocity = velocity[0].cpu().numpy()
                 else:
-                    # Use action chunking: predict new chunk when needed
-                    if action_chunk is None or chunk_idx >= config.chunk_size:
-                        pred_actions, _, _ = policy(
+                    # Use velocity chunking: predict new chunk when needed
+                    if velocity_chunk is None or chunk_idx >= config.chunk_size:
+                        pred_velocities, _, _ = policy(
                             proprio_tensor, image, deterministic=True
                         )
-                        action_chunk = pred_actions.squeeze(0).cpu().numpy()
+                        velocity_chunk = pred_velocities.squeeze(0).cpu().numpy()
                         chunk_idx = 0
 
-                    action = action_chunk[chunk_idx]
+                    velocity = velocity_chunk[chunk_idx]
                     chunk_idx += 1
 
-            # Denormalize action
-            action = denormalize(action, statistics['action'], config.action_norm_type)
-            
-            # Step environment
-            env.action(action)
+            # Denormalize velocity
+            velocity = denormalize(velocity, statistics['action'], config.action_norm_type)
+
+            # Execute velocity command
+            env.action(velocity)
 
             step_count += 1
 
@@ -175,7 +176,6 @@ def main(config):
 
             if step_count >= config.max_steps:
                 break
-
 
     except Exception as e:
         traceback.print_exc()

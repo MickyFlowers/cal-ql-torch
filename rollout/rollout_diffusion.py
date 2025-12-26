@@ -1,8 +1,9 @@
 """
-Diffusion Policy Rollout
+Diffusion Policy Rollout with Velocity Control
 
 Rollout script for deploying Diffusion Policy in the UR robot environment.
-Uses EMA model for inference and supports action horizon prediction.
+Uses EMA model for inference and supports velocity horizon prediction.
+The policy outputs velocity commands directly.
 """
 
 import time
@@ -121,12 +122,11 @@ def main(config):
         with open(config.statistics_path, 'r') as f:
             statistics = yaml.safe_load(f)
 
-        
         observation = env.reset()
         step_count = 0
 
-        # Action horizon buffer
-        action_horizon = None
+        # Velocity horizon buffer
+        velocity_horizon = None
         horizon_idx = 0
 
         while True:
@@ -148,28 +148,28 @@ def main(config):
             image = np_buffer_to_pil_image(np.frombuffer(image_bytes, dtype=np.uint8))
             image = image_transform(image).unsqueeze(0).to(device=config.device)
 
-            # Get action from policy
+            # Get velocity from policy
             with torch.no_grad():
-                # Predict new action horizon when buffer is empty or depleted
-                if action_horizon is None or horizon_idx >= config.action_horizon_steps:
+                # Predict new velocity horizon when buffer is empty or depleted
+                if velocity_horizon is None or horizon_idx >= config.action_horizon_steps:
                     # Get image embeddings from vision encoder
                     # VitFeatureExtractor returns (cls_token, patch_tokens)
                     # Training uses patch_tokens (index [1])
                     _, img_tokens = vision_encoder(image)
 
-                    # Predict action sequence
-                    action_pred = policy.predict_action(img_tokens, proprio_tensor)
-                    action_horizon = action_pred.squeeze(0).float().cpu().numpy()
+                    # Predict velocity sequence
+                    velocity_pred = policy.predict_action(img_tokens, proprio_tensor)
+                    velocity_horizon = velocity_pred.squeeze(0).float().cpu().numpy()
                     horizon_idx = 0
 
-                action = action_horizon[horizon_idx]
+                velocity = velocity_horizon[horizon_idx]
                 horizon_idx += 1
 
-            # Denormalize action
-            action = denormalize(action, statistics['action'], config.action_norm_type)
+            # Denormalize velocity
+            velocity = denormalize(velocity, statistics['action'], config.action_norm_type)
 
-            # Step environment
-            # env.action(action)
+            # Execute velocity command
+            env.action(velocity)
 
             step_count += 1
 
@@ -180,7 +180,6 @@ def main(config):
 
             if step_count >= config.max_steps:
                 break
-
 
     except Exception as e:
         traceback.print_exc()
