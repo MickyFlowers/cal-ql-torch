@@ -12,7 +12,9 @@ from std_msgs.msg import Int8MultiArray
 from xlib.algo.controller import AdmittanceController
 from xlib.algo.utils.image_utils import compressed_msg_to_bytes
 from xlib.algo.utils.random import sample_disturbance
-from xlib.algo.utils.transforms import applyDeltaPose6d
+from xlib.algo.utils.transforms import (applyDeltaPose6d, calcPose6dError,
+                                        invPose6d, matrixToPose6d,
+                                        velTransform)
 from xlib.device.keyboard import KeyboardReader
 from xlib.device.manipulator import UR
 
@@ -22,7 +24,10 @@ class UrEnv(gym.Env):
         super().__init__()
         self.config = config
         # ur_robot init
-        self.ur_robot = UR(config.ip)
+        
+        base_to_world_mtx = np.load(config.base_to_world_file)
+        self.base_to_world = matrixToPose6d(base_to_world_mtx)
+        self.ur_robot = UR(config.ip, self.base_to_world)
         # init variables    
         self.ft_value = None
         self.img_obs = None
@@ -63,14 +68,17 @@ class UrEnv(gym.Env):
         self._spin_thread = threading.Thread(target=self._spin, daemon=True)
         self._spin_thread.start()
     def _spacemouse_callback(self, twist_msg: Twist):
-        self.space_mouse_twist = np.array([
+        space_mouse_twist = np.array([
             twist_msg.linear.x,
             twist_msg.linear.y,
-            twist_msg.linear.z,
+            -twist_msg.linear.z,
             twist_msg.angular.x,
             twist_msg.angular.y,
-            twist_msg.angular.z,
+            -twist_msg.angular.z,
         ])
+        
+        self.space_mouse_twist = velTransform(space_mouse_twist, invPose6d(self.ur_robot.tcp_pose)[3:])
+        
     def _spacemouse_buttons_callback(self, buttons_msg: Int8MultiArray):
         buttons = buttons_msg.data
         if self.enable_teleop:
@@ -128,13 +136,17 @@ class UrEnv(gym.Env):
     def _control_loop(self, event):
         if not (self.running and self._check_obs()):
             return
-        
-        ft_value = self.ft_value.copy()
-        target_pose = self.target_pose.copy()
 
-        delta_pose = self.admittance_controller.update(1.0 / self.config.ctrl_freq, x_dot=None, f_ext=ft_value
+        ft_value_in_tcp = self.ft_value.copy()
+        target_pose = self.target_pose.copy()
+        
+        tcp_in_target = calcPose6dError(target_pose, self.ur_robot.tcp_pose)
+        ft_value_in_target_tcp = velTransform(ft_value_in_tcp, tcp_in_target[3:])
+        print(ft_value_in_target_tcp)
+        tcp_vel = velTransform(self.ur_robot.tcp_velocity, invPose6d(target_pose)[3:])
+        
+        new_pose = self.admittance_controller.update(1.0 / self.config.ctrl_freq, tcp_pose=self.ur_robot.tcp_pose, tcp_vel=tcp_vel, target_pose=target_pose ,f_ext=ft_value_in_target_tcp
         )
-        new_pose = applyDeltaPose6d(target_pose, delta_pose)
         self.ur_robot.servoTcp(new_pose, 1.0 / self.config.ctrl_freq)
             
 
@@ -178,11 +190,11 @@ class UrEnv(gym.Env):
         # reset_pose = applyDeltaPose6d(reset_pose, delta_pose)
         self.target_pose = reset_pose.copy()
         print("Environment resetting, please wait...")
-        first_reset_pose = reset_pose.copy()
-        first_reset_pose[:2] = self.ur_robot.tcp_pose[:2]
+        first_reset_pose = self.ur_robot.tcp_pose.copy()
+        first_reset_pose[0] = reset_pose[0]
         self.ur_robot.moveToPose(first_reset_pose, asynchronous=False)
         self.ur_robot.moveToPose(reset_pose, asynchronous=False)
-        self.ur_robot.reset_servo_target_tcp()
+        self.ur_robot.reset_servo_target()
         rospy.Rate(1).sleep()
         self.wait_for_obs()
         print("waiting for manully start...")

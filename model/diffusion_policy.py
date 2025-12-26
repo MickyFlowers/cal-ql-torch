@@ -477,7 +477,7 @@ class DiffusionPolicy(nn.Module):
         
         device = state_traj.device
         dtype = state_traj.dtype
-        noisy_action = torch.randn(
+        noisy_action = torch.zeros(
             size=(state_traj.shape[0], self.pred_horizon, self.action_dim), 
             dtype=dtype, device=device)
         

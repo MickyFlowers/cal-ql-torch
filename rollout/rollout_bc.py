@@ -93,54 +93,51 @@ def main(config):
         with open(config.statistics_path, 'r') as f:
             statistics = yaml.safe_load(f)
 
-        episode_count = 0
-        while episode_count < config.num_episodes:
-            observation = env.reset()
-            step_count = 0
+        
+        
+        env.reset()
+        step_count = 0
+        while True:
+            start_time = time.time()
+            observation = env.get_observation()
+            # Extract observations
+            jnt_obs = observation["jnt_obs"]
+            tcp_obs = observation["tcp_obs"]
+            proprio = np.concatenate([jnt_obs, tcp_obs], axis=-1)
 
-            while True:
-                start_time = time.time()
+            # Normalize proprioception
+            proprio = normalize(proprio, statistics['proprio'], config.proprio_norm_type)
+            proprio_tensor = torch.tensor(
+                proprio, dtype=torch.float32
+            ).unsqueeze(0).to(device=config.device)
 
-                # Extract observations
-                jnt_obs = observation["jnt_obs"]
-                tcp_obs = observation["tcp_obs"]
-                proprio = np.concatenate([jnt_obs, tcp_obs], axis=-1)
+            # Process image
+            image_bytes = observation["img_obs"]
+            image = np_buffer_to_pil_image(np.frombuffer(image_bytes, dtype=np.uint8))
+            image = image_transform(image).unsqueeze(0).to(device=config.device)
 
-                # Normalize proprioception
-                proprio = normalize(proprio, statistics['proprio'], config.proprio_norm_type)
-                proprio_tensor = torch.tensor(
-                    proprio, dtype=torch.float32
-                ).unsqueeze(0).to(device=config.device)
+            # Get action from policy
+            with torch.no_grad():
+                action, _ = policy(proprio_tensor, image, deterministic=True)
+                action = action.squeeze(0).cpu().numpy()
 
-                # Process image
-                image_bytes = observation["img_obs"]
-                image = np_buffer_to_pil_image(np.frombuffer(image_bytes, dtype=np.uint8))
-                image = image_transform(image).unsqueeze(0).to(device=config.device)
+            # Denormalize action
+            action = denormalize(action, statistics['action'], config.action_norm_type)
 
-                # Get action from policy
-                with torch.no_grad():
-                    action, _ = policy(proprio_tensor, image, deterministic=True)
-                    action = action.squeeze(0).cpu().numpy()
+            # Step environment
+            env.action(action)
 
-                # Denormalize action
-                action = denormalize(action, statistics['action'], config.action_norm_type)
+            step_count += 1
 
-                # Step environment
-                next_observations, reward, done, info = env.step(action)
+            # Control execution frequency
+            elapsed_time = time.time() - start_time
+            if elapsed_time < 1.0 / config.freq:
+                time.sleep(1.0 / config.freq - elapsed_time)
 
-                observation = next_observations
-                step_count += 1
+            if step_count >= config.max_steps:
+                break
 
-                # Control execution frequency
-                elapsed_time = time.time() - start_time
-                if elapsed_time < 1.0 / config.freq:
-                    time.sleep(1.0 / config.freq - elapsed_time)
-
-                if done or step_count >= config.max_steps:
-                    break
-
-            episode_count += 1
-            print(f"Episode {episode_count}/{config.num_episodes} completed with {step_count} steps")
+            
 
     except Exception as e:
         traceback.print_exc()

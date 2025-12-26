@@ -18,7 +18,7 @@ latent_dim: 32
 num_encoder_layers: 4
 num_decoder_layers: 4
 num_heads: 8
-chunk_size: 100
+chunk_size: 30
 dim_feedforward: 2048
 backbone_name: resnet18
 
@@ -36,5 +36,5 @@ temporal_decay: 0.01
 
 # Rollout settings
 num_episodes: 10
-max_steps: 1000
-freq: 30  # Control loop frequency in Hz
+max_steps: 300
+freq: 10  # Control loop frequency in Hz
