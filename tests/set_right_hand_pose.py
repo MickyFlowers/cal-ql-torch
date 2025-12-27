@@ -20,14 +20,14 @@ from xlib.device.manipulator.ur_robot import UR
 
 # reset left hand pose
 tip_transform = np.zeros(6)
-tip_transform[2] = 0.18
+tip_transform[2] = 0.2
 left_base_in_world_mtx = np.load('/home/cyx/project/cal-ql-torch/assets/left_base_to_world.npy')
 left_base_in_world = matrixToPose6d(left_base_in_world_mtx)
 left_ip = "172.16.11.233"
 left_ur_robot = UR(left_ip, left_base_in_world)
 print(left_ur_robot.tcp_pose)
 left_tcp_pose = np.zeros(6)
-left_tcp_pose[:3] = np.array([ -0.10,  0.601 , 0.2])
+left_tcp_pose[:3] = np.array([ -0.06,  0.60 , 0.2])
 
 euler = np.array([3.0 / 4.0 * np.pi, 0.0, np.pi / 2])
 rot_vec = R.from_euler('xyz', euler).as_rotvec()
@@ -40,5 +40,5 @@ left_tcp_pose = applyDeltaPose6d(left_tcp_pose, invPose6d(tip_transform))
 
 
 
-left_ur_robot.moveToPose(left_tcp_pose)
+# left_ur_robot.moveToPose(left_tcp_pose)
 

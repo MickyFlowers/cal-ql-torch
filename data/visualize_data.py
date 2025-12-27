@@ -99,22 +99,23 @@ def visualize_data(args):
             # plot video
             image_bytes = f['observations']['img_obs']
             episode_length = image_bytes.shape[0]
+            
             images = []
             for i in range(episode_length):
                 cv2_image = bytes_to_cv2_image(image_bytes[i])
                 images.append(cv2_image)
             
-            save_video(output_path, images, fps=100)
+            save_video(output_path, images, fps=args.fps)
             # plot pose
             tcp_obs = f['observations']['tcp_obs'][:]
             frames = make_3d_trajectory_video(tcp_obs, future_len=50)
             pose_video_path = os.path.join(f"{args.data_root}_visualizations", f"{base_name}", "traj.mp4")
-            save_video(pose_video_path, frames, fps=100)
+            save_video(pose_video_path, frames, fps=args.fps)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--data_root", type=str, required=True, help="Path to the image data file.")
-    parser.add_argument("--sample_ratio", type=int, default=1, help="sample ratio")
+    parser.add_argument("--sample_ratio", type=float, default=1, help="sample ratio")
     parser.add_argument("--fps", type=int, default=30,  help="data fps")
     args = parser.parse_args()
     visualize_data(args)

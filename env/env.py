@@ -1,4 +1,5 @@
 import threading
+import time
 
 import cv2
 import gym
@@ -6,12 +7,14 @@ import numpy as np
 import rospy
 from cv_bridge import CvBridge
 from geometry_msgs.msg import Twist, WrenchStamped
+from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import Image
 from std_msgs.msg import Int8MultiArray
 from xlib.algo.controller import VelocityAdmittanceController
-from xlib.algo.utils.transforms import invPose6d, matrixToPose6d, velTransform
+from xlib.algo.utils.transforms import *
 from xlib.device.keyboard import KeyboardReader
 from xlib.device.manipulator import UR
+from xlib.device.robotiq.robotiq_gripper import RobotiqGripper
 
 
 class UrEnv(gym.Env):
@@ -30,10 +33,22 @@ class UrEnv(gym.Env):
         self.img_obs = None
         self.tcp_obs = None
         self.jnt_obs = None
-
+        self.tip_transform = np.zeros(6)
+        self.tip_transform[2] = 0.2
         self.cv_bridge = CvBridge()
         self.keyboard_reader = KeyboardReader()
-
+        self.ur_gripper = RobotiqGripper()
+        self.ur_gripper.connect(config.ip, 63352)
+        self.ur_gripper.activate()
+        print("Press y to grasp")
+        while True:
+            key = self.keyboard_reader.get_key()
+            if key == 'y':
+                print('y pressed')
+                self.ur_gripper.move_and_wait_for_pos(255, 255, 100)
+                time.sleep(0.01)
+                break
+        
         # Action space: 6D velocity (linear + angular)
         self.action_space = gym.spaces.Box(
             low=np.array([-1.0] * 6),
@@ -69,7 +84,7 @@ class UrEnv(gym.Env):
 
     def _spacemouse_callback(self, twist_msg: Twist):
         """Process SpaceMouse twist input as velocity command."""
-        space_mouse_twist = np.array([
+        self.space_mouse_twist = np.array([
             twist_msg.linear.x,
             twist_msg.linear.y,
             -twist_msg.linear.z,
@@ -78,7 +93,7 @@ class UrEnv(gym.Env):
             -twist_msg.angular.z,
         ])
         # Transform to TCP frame
-        self.space_mouse_twist = velTransform(space_mouse_twist, invPose6d(self.ur_robot.tcp_pose)[3:])
+        # self.space_mouse_twist = velTransform(space_mouse_twist, invPose6d(self.ur_robot.tcp_pose)[3:])
 
     def _spacemouse_buttons_callback(self, buttons_msg: Int8MultiArray):
         buttons = buttons_msg.data
@@ -132,7 +147,8 @@ class UrEnv(gym.Env):
         ft_value_in_world = velTransform(ft_value_in_tcp, self.ur_robot.tcp_pose[3:])
         target_velocity = self.target_velocity.copy()
         dt = 1.0 / self.config.ctrl_freq
-        new_vel = self.admittance_controller.update(dt, target_velocity, ft_value_in_world)
+        new_vel = self.admittance_controller.update(dt, target_velocity, self.ur_robot.tcp_velocity, ft_value_in_world)
+        # print(new_vel)
         self.ur_robot.applyVel(new_vel, time=dt)
         
         
@@ -181,6 +197,13 @@ class UrEnv(gym.Env):
 
         print("Environment resetting, moving to init pose...")
         reset_pose = np.array(self.config.reset_pose)
+        sample = np.random.uniform(self.config.random_lower[3], self.config.random_upper[3])
+        delta_pose = np.zeros(6)
+        delta_pose[3:] = R.from_euler('xyz', np.array([sample, 0.0, 0.0])).as_rotvec()
+        reset_pose = applyDeltaPose6d(reset_pose, self.tip_transform)
+        reset_pose = applyDeltaPose6d(reset_pose, delta_pose)
+        reset_pose[:3] += np.random.uniform(self.config.random_lower[:3], self.config.random_upper[:3])
+        reset_pose = applyDeltaPose6d(reset_pose, invPose6d(self.tip_transform))
         print("Environment resetting, please wait...")
         first_reset_pose = self.ur_robot.tcp_pose.copy()
         first_reset_pose[0] = reset_pose[0]
@@ -191,7 +214,27 @@ class UrEnv(gym.Env):
         self.wait_for_obs()
         print("Environment reset done.")
         self.running = True
-
+        
+    def regrasp(self):
+        self.running = False
+        self.ur_robot.speedStop()
+        cur_tcp = self.ur_robot.tcp_pose
+        cur_tcp[:3] = np.array([-0.15927285,  0.60000967,  0.33677307])
+        euler = np.array([3.0 / 4.0 * np.pi, 0.0, np.pi / 2])
+        cur_tcp[3:] = R.from_euler('xyz', euler).as_rotvec()
+        cur_tip = applyDeltaPose6d(cur_tcp, self.tip_transform)
+        # open gripper
+        self.ur_gripper.move_and_wait_for_pos(0, 255, 100)
+        sample = np.random.uniform(-0.2, 0.2)
+        delta_pose = np.zeros(6)
+        delta_pose[3:] = R.from_euler('xyz', np.array([sample, 0.0, 0.0])).as_rotvec()
+        rand_tip = applyDeltaPose6d(cur_tip, delta_pose)
+        regrasp_pos_rand = np.random.uniform([-0.005, 0.0, -0.005], [0.0, 0.0, 0.005])
+        rand_tip[:3] += regrasp_pos_rand
+        self.ur_robot.moveToPose(applyDeltaPose6d(rand_tip, invPose6d(self.tip_transform)))
+        # close gripper
+        self.ur_gripper.move_and_wait_for_pos(255, 255, 100)
+        
     def wait_for_obs(self):
         while not self._check_obs():
             rospy.Rate(5).sleep()
