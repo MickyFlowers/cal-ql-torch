@@ -1,0 +1,52 @@
+defaults:
+  - iql: iql_defaults
+  - logging: logging_defaults
+  - dataset: dataset_defaults
+
+observation_dim: 12
+action_dim: 6
+
+seed: 42
+save_model: false
+batch_size: 32
+num_workers: 4
+
+# Architecture & policy hyperparameters
+hidden_dim: 256
+orthogonal_init: true
+
+# Policy network architecture
+policy_obs_proj_arch: '256-256-256-256'
+policy_out_proj_arch: '256-256-256-256'
+policy_log_std_multiplier: 1.0
+policy_log_std_offset: -1.0
+train_policy_backbone: true
+
+# Q-function network architecture
+q_obs_proj_arch: '256-256-256-256'
+q_out_proj_arch: '256-256-256-256'
+train_q_backbone: true
+
+# V-function network architecture (unique to IQL)
+v_obs_proj_arch: '256-256-256-256'
+v_out_proj_arch: '256-256-256-256'
+train_v_backbone: true
+
+# Training schedule
+train_iql_epochs: 1000
+
+# Learning rate scheduler
+use_lr_scheduler: true
+warmup_ratio: 0.05  # 5% of total steps for warmup
+min_lr_ratio: 0.1   # decay to 10% of initial lr
+
+# Model compilation
+torch_compile_mode: "disable"
+
+# Checkpointing
+save_every_n_epoch: 100
+ckpt_path: ./checkpoints
+load_ckpt_path: ""
+
+# Device
+device: cuda:0

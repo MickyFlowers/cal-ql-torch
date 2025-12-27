@@ -8,7 +8,9 @@ import copy
 import math
 
 import torch
+import torch.distributed as dist
 from torch.amp import GradScaler, autocast
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import LambdaLR
 
 from model.ema_model import EMAModel
@@ -205,6 +207,41 @@ class DiffusionPolicyTrainer:
         self.vision_encoder.to(device)
         self.policy_ema_model.to(device)
         self.vision_encoder_ema_model.to(device)
+
+    def setup_multi_gpu(self, local_rank: int):
+        """Setup distributed training with DDP."""
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl")
+
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+        self.to_device(device)
+
+        # Wrap models with DDP
+        self.policy = DDP(
+            self.policy,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            broadcast_buffers=False,
+        )
+        self.vision_encoder = DDP(
+            self.vision_encoder,
+            device_ids=[local_rank],
+            output_device=local_rank,
+            broadcast_buffers=False,
+        )
+
+        # Recreate optimizer for DDP models
+        params_to_optimize = list(self.policy.parameters()) + list(self.vision_encoder.parameters())
+        self.optimizer = torch.optim.AdamW(
+            params_to_optimize,
+            lr=self.config.learning_rate,
+            betas=tuple(self.config.betas),
+            weight_decay=self.config.weight_decay,
+            eps=self.config.adam_epsilon
+        )
+
+        print(f"[Rank {dist.get_rank()}] DiffusionPolicy Trainer multi-GPU setup complete. Device: {device}")
 
     @property
     def total_steps(self):
