@@ -401,3 +401,74 @@ class ResNetQFunction(nn.Module):
         q_value = self.out_proj(ft)
         return q_value.view(obs_shape, num_repeat, 1)
 
+
+class ResNetVFunction(nn.Module):
+    """
+    Value Function V(s) using ResNet backbone for image encoding.
+    Used in IQL (Implicit Q-Learning) algorithm.
+    """
+
+    def __init__(
+        self,
+        observation_dim,
+        obs_proj_arch="256-256",
+        out_proj_arch="256-256",
+        hidden_dim=256,
+        orthogonal_init=False,
+        resnet_model='resnet18',
+        image_size=(224, 224),
+        train_backbone=False,
+        out_indices=3,
+    ):
+        super().__init__()
+        self.observation_dim = observation_dim
+        self.backbone = timm.create_model(resnet_model, pretrained=True, features_only=True, out_indices=(out_indices,))
+        for module in self.backbone.modules():
+            if isinstance(module, torch.nn.ReLU):
+                module.inplace = False
+        if not train_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+        else:
+            for param in self.backbone.parameters():
+                param.requires_grad = True
+
+        # Get the number of output channels from the backbone
+        with torch.no_grad():
+            dummy_input = torch.randn(1, 3, *image_size)
+            dummy_output = self.backbone(dummy_input)
+            backbone_out_channels = dummy_output[0].shape[1]
+
+        # Feature projection: Global Average Pooling + Linear Layer
+        self.image_feature_proj = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(backbone_out_channels, hidden_dim)
+        )
+        # Note: V(s) only takes state, no action
+        self.obs_proj = FullyConnectedNetwork(
+            input_dim=observation_dim, output_dim=hidden_dim, arch=obs_proj_arch, orthogonal_init=orthogonal_init
+        )
+        self.out_proj = FullyConnectedNetwork(
+            input_dim=2 * hidden_dim, output_dim=1, arch=out_proj_arch, orthogonal_init=orthogonal_init
+        )
+
+    def forward(self, observations, images):
+        """
+        Compute V(s) given state observations and images.
+
+        Args:
+            observations: [batch, obs_dim] proprioceptive observations
+            images: [batch, 3, H, W] images
+
+        Returns:
+            V(s): [batch, 1] state values
+        """
+        image_ft_map = self.backbone(images)[0]
+        image_ft = self.image_feature_proj(image_ft_map)
+        obs_ft = self.obs_proj(observations)
+        ft = torch.cat([obs_ft, image_ft], dim=-1)
+
+        v_value = self.out_proj(ft)
+        return v_value
+

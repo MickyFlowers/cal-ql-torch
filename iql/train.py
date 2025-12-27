@@ -1,12 +1,16 @@
 """
-Cal-QL Offline Training Script
+IQL (Implicit Q-Learning) Offline Training Script
 
-Train Cal-QL policy using offline reinforcement learning.
+Train IQL algorithm for offline reinforcement learning.
 Supports both single-GPU and multi-GPU (distributed) training automatically.
 
+Reference:
+- Paper: "Offline Reinforcement Learning with Implicit Q-Learning" (ICLR 2022)
+- Official Implementation: https://github.com/ikostrikov/implicit_q_learning
+
 Usage:
-    Single GPU:  python -m cal_ql.train_offline [args]
-    Multi GPU:   torchrun --nproc_per_node=N -m cal_ql.train_offline [args]
+    Single GPU:  python -m iql.train [args]
+    Multi GPU:   torchrun --nproc_per_node=N -m iql.train [args]
 """
 
 import copy
@@ -21,9 +25,9 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-from cal_ql.cal_ql_sac_trainer import Trainer
 from data.dataset import CalqlDataset
-from model.model import ResNetPolicy, ResNetQFunction
+from iql.iql_trainer import IQLTrainer
+from model.model import ResNetPolicy, ResNetQFunction, ResNetVFunction
 from utils.distributed import (
     barrier,
     cleanup_distributed,
@@ -45,7 +49,7 @@ def dict_to_device(batch, device):
     return batch
 
 
-@hydra.main(config_path="../config", config_name="train_offline", version_base=None)
+@hydra.main(config_path="../config", config_name="train_iql", version_base=None)
 def main(cfg: DictConfig):
     # Setup training environment (auto-detects single vs multi GPU)
     local_rank, device, world_size = setup_training(cfg.device)
@@ -88,10 +92,6 @@ def main(cfg: DictConfig):
         prefetch_factor=2,
     )
 
-    # Calculate BC steps based on epochs
-    cfg.cal_ql.bc_start_step = cfg.bc_start_epochs * len(dataloader)
-    cfg.cal_ql.bc_transition_steps = getattr(cfg, 'bc_transition_epochs', 10) * len(dataloader)
-
     # Set seeds (add local_rank offset for distributed)
     np.random.seed(cfg.seed + local_rank)
     torch.manual_seed(cfg.seed + local_rank)
@@ -99,7 +99,7 @@ def main(cfg: DictConfig):
     observation_dim = cfg.observation_dim
     action_dim = cfg.action_dim
 
-    # Create policy
+    # Create policy network
     policy = ResNetPolicy(
         observation_dim,
         action_dim,
@@ -112,7 +112,7 @@ def main(cfg: DictConfig):
         train_backbone=cfg.train_policy_backbone,
     )
 
-    # Create Q-functions
+    # Create Q-function networks
     qf = {}
     qf['qf1'] = ResNetQFunction(
         observation_dim,
@@ -135,37 +135,43 @@ def main(cfg: DictConfig):
     qf['target_qf1'] = copy.deepcopy(qf['qf1'])
     qf['target_qf2'] = copy.deepcopy(qf['qf2'])
 
-    cfg.cal_ql.target_entropy = -np.prod((1, action_dim)).item()
+    # Create V-function network (unique to IQL)
+    vf = ResNetVFunction(
+        observation_dim,
+        cfg.v_obs_proj_arch,
+        cfg.v_out_proj_arch,
+        cfg.hidden_dim,
+        cfg.orthogonal_init,
+        train_backbone=cfg.train_v_backbone
+    )
 
-    # Create trainer and setup device/distributed
-    sac = Trainer(cfg.cal_ql, policy, qf)
+    # Create IQL trainer and setup device/distributed
+    iql = IQLTrainer(cfg.iql, policy, qf, vf)
     if is_distributed:
-        sac.setup_multi_gpu(local_rank)
+        iql.setup_multi_gpu(local_rank)
     else:
-        sac.to_device(device=device)
+        iql.to_device(device=device)
 
     # Compile if not disabled
     if cfg.torch_compile_mode != "disable":
-        sac.compile(mode=cfg.torch_compile_mode)
+        iql.compile(mode=cfg.torch_compile_mode)
 
     # Setup learning rate scheduler
-    num_training_steps = cfg.train_offline_epochs * len(dataloader)
+    num_training_steps = cfg.train_iql_epochs * len(dataloader)
     warmup_ratio = getattr(cfg, 'warmup_ratio', 0.05)
     min_lr_ratio = getattr(cfg, 'min_lr_ratio', 0.1)
     if getattr(cfg, 'use_lr_scheduler', True):
-        sac.setup_lr_scheduler(num_training_steps, warmup_ratio=warmup_ratio, min_lr_ratio=min_lr_ratio)
+        iql.setup_lr_scheduler(num_training_steps, warmup_ratio=warmup_ratio, min_lr_ratio=min_lr_ratio)
 
     # Load checkpoint if specified
     if cfg.load_ckpt_path != "":
-        sac.load_checkpoint(cfg.load_ckpt_path)
+        iql.load_checkpoint(cfg.load_ckpt_path)
 
     viskit_metrics = {}
-    cql_min_q_weight = cfg.cql_min_q_weight
     total_grad_steps = 0
     train_timer = None
     epoch = 0
     train_metrics = None
-    expl_metrics = None
 
     # Create checkpoint directory (only on main process)
     ckpt_path = None
@@ -176,12 +182,9 @@ def main(cfg: DictConfig):
     while True:
         metrics = {"epoch": epoch}
         metrics["grad_steps"] = total_grad_steps
-        metrics["epoch"] = epoch
         metrics["train_time"] = 0 if train_timer is None else train_timer()
         if train_metrics is not None:
             metrics.update(train_metrics)
-        if expl_metrics is not None:
-            metrics.update(expl_metrics)
 
         # Log only on main process
         if is_main_process():
@@ -193,10 +196,10 @@ def main(cfg: DictConfig):
 
         # Save checkpoint (only on main process)
         if epoch % cfg.save_every_n_epoch == 0 and epoch != 0 and is_main_process():
-            ckpt_file_path = os.path.join(ckpt_path, f'checkpoint_{epoch:05d}.pt')
-            sac.save_checkpoint(ckpt_file_path)
+            ckpt_file_path = os.path.join(ckpt_path, f'iql_checkpoint_{epoch:05d}.pt')
+            iql.save_checkpoint(ckpt_file_path)
 
-        if epoch >= cfg.train_offline_epochs:
+        if epoch >= cfg.train_iql_epochs:
             if is_main_process():
                 print("Finished Training")
             break
@@ -211,9 +214,7 @@ def main(cfg: DictConfig):
             num_batches = 0
             for batch in tqdm(dataloader, desc="Training", disable=not is_main_process()):
                 batch = dict_to_device(batch, device=device)
-                batch_metrics = sac.train(
-                    batch, cql_min_q_weight=cql_min_q_weight
-                )
+                batch_metrics = iql.train(batch)
                 # Accumulate metrics
                 for k, v in batch_metrics.items():
                     if isinstance(v, torch.Tensor):

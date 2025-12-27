@@ -17,7 +17,8 @@ from utils.utils import prefix_metrics
 class BehaviorCloneTrainer(object):
     def __init__(self, lr, policy):
         self.policy = policy
-        
+        self.lr = lr
+
         self.optimizers = {}
         self.optimizers["policy"] = optim.Adam(self.policy.parameters(), lr=lr)
         self.scaler = GradScaler()
@@ -75,15 +76,17 @@ class BehaviorCloneTrainer(object):
     def setup_multi_gpu(self, local_rank: int):
         if not dist.is_initialized():
             dist.init_process_group(backend="nccl")
-        
+
         torch.cuda.set_device(local_rank)
         device = torch.device(f"cuda:{local_rank}")
         self.to_device(device)
 
         self.policy = DDP(self.policy, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
 
+        # Recreate optimizer for DDP model
+        self.optimizers["policy"] = torch.optim.Adam(self.policy.parameters(), lr=self.lr)
 
-        self.optimizers["policy"] = torch.optim.Adam(self.policy.parameters(), lr=self.config.policy_lr)
+        print(f"[Rank {dist.get_rank()}] BC Trainer multi-GPU setup complete. Device: {device}")
         
         
     def load_checkpoint(self, filepath):

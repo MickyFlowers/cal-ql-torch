@@ -1,12 +1,12 @@
 """
-Diffusion Policy Training Script
+ACT Training Script
 
-Train Diffusion Policy for action prediction with transformer-based denoising.
+Train ACT (Action Chunking with Transformers) policy using imitation learning.
 Supports both single-GPU and multi-GPU (distributed) training automatically.
 
 Usage:
-    Single GPU:  python -m diffusion_policy.train [args]
-    Multi GPU:   torchrun --nproc_per_node=N -m diffusion_policy.train [args]
+    Single GPU:  python -m act.train [args]
+    Multi GPU:   torchrun --nproc_per_node=N -m act.train [args]
 """
 
 import os
@@ -15,18 +15,19 @@ import time
 import hydra
 import numpy as np
 import torch
+import torch.distributed as dist
 from omegaconf import DictConfig, OmegaConf
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-from data.dataset import DiffusionPolicyDataset
-from diffusion_policy.trainer import DiffusionPolicyTrainer
-from model.diffusion_policy import DiffusionPolicy
-from model.vision_model import VitFeatureExtractor
+from act.act_model import ACTPolicy
+from act.act_trainer import ACTTrainer
+from data.dataset import ACTDataset
 from utils.distributed import (
     barrier,
     cleanup_distributed,
+    is_distributed_available,
     is_main_process,
     setup_training,
     sync_metrics,
@@ -34,17 +35,7 @@ from utils.distributed import (
 from utils.logger import WandBLogger
 
 
-def _dict_to_device(batch, device):
-    """Recursively move batch to device."""
-    for k, v in batch.items():
-        if isinstance(v, dict):
-            batch[k] = _dict_to_device(v, device)
-        elif isinstance(v, torch.Tensor):
-            batch[k] = v.to(device=device, non_blocking=True)
-    return batch
-
-
-@hydra.main(config_path="../config", config_name="train_diffusion_policy", version_base=None)
+@hydra.main(config_path="../config", config_name="train_act", version_base=None)
 def main(cfg: DictConfig):
     # Setup training environment (auto-detects single vs multi GPU)
     local_rank, device, world_size = setup_training(cfg.device)
@@ -72,7 +63,7 @@ def main(cfg: DictConfig):
     # Create dataset
     if is_main_process():
         print(f"Loading dataset from {cfg.dataset.root_path}")
-    dataset = DiffusionPolicyDataset(cfg.dataset)
+    dataset = ACTDataset(cfg.dataset)
 
     # Create dataloader with optional distributed sampler
     sampler = DistributedSampler(dataset, shuffle=True) if is_distributed else None
@@ -88,91 +79,91 @@ def main(cfg: DictConfig):
 
     if is_main_process():
         print(f"Dataset: {len(dataset)} samples")
+        print(f"Action dim: {dataset.action_dim}")
+        print(f"Proprio dim: {dataset.proprio_dim}")
         print(f"Batches per epoch{' (per GPU)' if is_distributed else ''}: {len(dataloader)}")
 
-    # Create policy
-    policy = DiffusionPolicy(
-        action_dim=cfg.action_dim,
-        pred_horizon=cfg.pred_horizon,
-        config=cfg.dp_config,
-        img_token_dim=cfg.img_token_dim,
-        state_token_dim=cfg.state_token_dim,
-        img_cond_len=cfg.img_cond_len,
-        img_pos_embed_config=cfg.img_pos_embed_config,
-        dtype=torch.bfloat16 if cfg.use_bf16 else torch.float32,
+    # Create model
+    policy = ACTPolicy(
+        action_dim=dataset.action_dim,
+        proprio_dim=dataset.proprio_dim,
+        hidden_dim=cfg.act.hidden_dim,
+        latent_dim=cfg.act.latent_dim,
+        num_encoder_layers=cfg.act.num_encoder_layers,
+        num_decoder_layers=cfg.act.num_decoder_layers,
+        num_heads=cfg.act.num_heads,
+        chunk_size=cfg.act.chunk_size,
+        dim_feedforward=cfg.act.dim_feedforward,
+        backbone_name=cfg.act.backbone_name,
+        pretrained_backbone=cfg.act.pretrained_backbone,
+        train_backbone=cfg.act.train_backbone,
     )
 
-    # Create vision encoder
-    vision_encoder = VitFeatureExtractor(
-        cfg.model_name,
-        True,
-        cfg.trainable_layers,
-        dtype=torch.bfloat16 if cfg.use_bf16 else torch.float32,
-    )
+    # Count parameters
+    if is_main_process():
+        num_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
+        print(f"Model parameters: {num_params:,}")
 
     # Create trainer and setup device/distributed
-    trainer = DiffusionPolicyTrainer(policy, vision_encoder, cfg.trainer)
+    trainer = ACTTrainer(cfg.act, policy)
     if is_distributed:
         trainer.setup_multi_gpu(local_rank)
     else:
         trainer.to_device(device)
 
-    # Setup learning rate scheduler
-    num_training_steps = cfg.max_epochs * len(dataloader)
-    trainer.setup_lr_scheduler(num_training_steps)
-
-    # Load checkpoint if specified
-    if cfg.load_ckpt_path and cfg.load_ckpt_path != "":
-        trainer.load_checkpoint(cfg.load_ckpt_path)
+    # Compile if requested
+    if cfg.torch_compile_mode is not None and cfg.torch_compile_mode != "disable":
+        if is_main_process():
+            print(f"Compiling model with mode: {cfg.torch_compile_mode}")
+        trainer.compile(mode=cfg.torch_compile_mode)
 
     # Create checkpoint directory (only on main process)
     ckpt_dir = None
-    if is_main_process():
-        ckpt_dir = os.path.join(
-            cfg.ckpt_path,
-            f'{cfg.logging.prefix}_{time.strftime("%Y%m%d_%H%M%S")}'
-        )
+    if cfg.save_every_n_epoch > 0 and is_main_process():
+        ckpt_dir = os.path.join(cfg.ckpt_path, f'{cfg.logging.prefix}_{time.strftime("%Y%m%d_%H%M%S")}')
         os.makedirs(ckpt_dir, exist_ok=True)
 
     # Training loop
     if is_main_process():
-        print(f"\nStarting training for {cfg.max_epochs} epochs")
+        print(f"\nStarting training for {cfg.num_epochs} epochs")
     global_step = 0
 
-    for epoch in range(1, cfg.max_epochs + 1):
+    for epoch in range(1, cfg.num_epochs + 1):
         # Set epoch for distributed sampler (important for shuffling)
         if sampler is not None:
             sampler.set_epoch(epoch)
 
         epoch_metrics = {
             'epoch': epoch,
-            'dp/loss': 0,
+            'act/total_loss': 0,
+            'act/recon_loss': 0,
+            'act/kl_loss': 0,
         }
         num_batches = 0
 
         # Progress bar only on main process
-        pbar = tqdm(dataloader, desc=f"Epoch {epoch}/{cfg.max_epochs}", disable=not is_main_process())
+        pbar = tqdm(dataloader, desc=f"Epoch {epoch}/{cfg.num_epochs}", disable=not is_main_process())
         for batch in pbar:
-            # Move batch to device
-            batch = _dict_to_device(batch, device)
-
             # Train step
             metrics = trainer.train(batch)
             global_step += 1
 
             # Accumulate metrics
-            for k, v in metrics.items():
-                val = v.item() if hasattr(v, 'item') else v
-                if k in epoch_metrics:
-                    epoch_metrics[k] += val
-                else:
-                    epoch_metrics[k] = val
+            for k in ['act/total_loss', 'act/recon_loss', 'act/kl_loss']:
+                if k in metrics:
+                    epoch_metrics[k] += metrics[k].item() if hasattr(metrics[k], 'item') else metrics[k]
             num_batches += 1
 
             # Update progress bar
             if is_main_process():
-                loss = metrics['dp/loss'].item() if hasattr(metrics['dp/loss'], 'item') else metrics['dp/loss']
-                pbar.set_postfix({'loss': f"{loss:.4f}"})
+                total_loss = metrics['act/total_loss'].item() if hasattr(metrics['act/total_loss'], 'item') else metrics['act/total_loss']
+                recon_loss = metrics['act/recon_loss'].item() if hasattr(metrics['act/recon_loss'], 'item') else metrics['act/recon_loss']
+                kl_loss = metrics['act/kl_loss'].item() if hasattr(metrics['act/kl_loss'], 'item') else metrics['act/kl_loss']
+                pbar.set_postfix({
+                    'loss': f"{total_loss:.4f}",
+                    'recon': f"{recon_loss:.4f}",
+                    'kl': f"{kl_loss:.4f}",
+                })
 
             # Log per-step metrics (only main process)
             if global_step % cfg.log_every_n_step == 0 and is_main_process() and wandb_logger is not None:
@@ -180,40 +171,42 @@ def main(cfg: DictConfig):
                 wandb_logger.log(step_metrics, step=global_step)
 
         # Average epoch metrics
-        for k in epoch_metrics:
-            if k != 'epoch':
-                epoch_metrics[k] /= num_batches
+        for k in ['act/total_loss', 'act/recon_loss', 'act/kl_loss']:
+            epoch_metrics[k] /= num_batches
 
         # Sync metrics across GPUs (if distributed)
         if is_distributed:
             epoch_metrics = sync_metrics(epoch_metrics)
 
-        # Add current learning rate
+        # Step scheduler
+        trainer.step_scheduler()
         epoch_metrics['lr'] = trainer.optimizer.param_groups[0]['lr']
 
         # Log epoch metrics (only main process)
         if is_main_process():
             if wandb_logger is not None:
                 wandb_logger.log(epoch_metrics, step=global_step)
-            print(f"Epoch {epoch}: loss={epoch_metrics['dp/loss']:.4f}")
+            print(f"Epoch {epoch}: loss={epoch_metrics['act/total_loss']:.4f}, "
+                  f"recon={epoch_metrics['act/recon_loss']:.4f}, "
+                  f"kl={epoch_metrics['act/kl_loss']:.4f}")
 
         # Evaluation (only main process)
-        if epoch % cfg.eval_every_n_epochs == 0 and is_main_process():
+        if epoch % cfg.eval_every_n_epoch == 0 and is_main_process():
             eval_metrics = trainer.evaluate(dataloader, num_batches=10)
             if wandb_logger is not None:
                 wandb_logger.log(eval_metrics, step=global_step)
-            print(f"  Eval: action_error={eval_metrics['eval/action_error']:.4f}")
+            print(f"  Eval: loss={eval_metrics['eval/total_loss']:.4f}")
 
         # Save checkpoint (only main process)
-        if epoch % cfg.save_every_n_epoch == 0 and is_main_process():
-            ckpt_path = os.path.join(ckpt_dir, f"checkpoint_epoch_{epoch:05d}.pt")
-            trainer.save_checkpoint(ckpt_path)
+        if cfg.save_every_n_epoch > 0 and epoch % cfg.save_every_n_epoch == 0 and is_main_process():
+            ckpt_file_path = os.path.join(ckpt_dir, f'checkpoint_{epoch:05d}.pt')
+            trainer.save_checkpoint(ckpt_file_path)
 
         # Synchronize before next epoch (if distributed)
         barrier()
 
     # Save final checkpoint (only main process)
-    if is_main_process():
+    if cfg.save_every_n_epoch > 0 and is_main_process():
         final_ckpt_path = os.path.join(ckpt_dir, "checkpoint_final.pt")
         trainer.save_checkpoint(final_ckpt_path)
         print(f"\nTraining complete! Final checkpoint saved to {final_ckpt_path}")

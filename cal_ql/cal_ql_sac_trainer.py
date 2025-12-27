@@ -414,9 +414,8 @@ class Trainer(object):
         self.qf['qf2'] = DDP(self.qf['qf2'], device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
 
         self.optimizers["policy"] = torch.optim.Adam(self.policy.parameters(), lr=self.config.policy_lr)
-        self.optimizers["qf"] = torch.optim.Adam(
-            list(self.qf['qf1'].parameters()) + list(self.qf['qf2'].parameters()), lr=self.config.qf_lr
-        )
+        self.optimizers['qf1'] = torch.optim.Adam(self.qf['qf1'].parameters(), lr=self.config.qf_lr)
+        self.optimizers['qf2'] = torch.optim.Adam(self.qf['qf2'].parameters(), lr=self.config.qf_lr)
         if self.config.cql_lagrange:
             self.optimizers["log_alpha_prime"] = torch.optim.Adam(self.log_alpha_prime.parameters(), lr=self.config.alpha_prime_lr)
 
@@ -446,15 +445,17 @@ class Trainer(object):
         self.policy.load_state_dict(checkpoint['policy_state_dict'])
         print(f"Loaded policy checkpoint from {filepath}")
     
-    def freeze_policy(self):
-        for param_group in self.optimizers["qf"].param_groups:
-            param_group['lr'] = self.config.freeze_qf_lr
+    def freeze_policy_fn(self):
+        for opt_name in ['qf1', 'qf2']:
+            for param_group in self.optimizers[opt_name].param_groups:
+                param_group['lr'] = self.config.freeze_qf_lr
         self.freeze_policy = True
         self.policy.freeze()
-    
-    def unfreeze_policy(self):
-        for param_group in self.optimizers["qf"].param_groups:
-            param_group['lr'] = self.config.qf_lr
+
+    def unfreeze_policy_fn(self):
+        for opt_name in ['qf1', 'qf2']:
+            for param_group in self.optimizers[opt_name].param_groups:
+                param_group['lr'] = self.config.qf_lr
         self.freeze_policy = False
         self.policy.unfreeze()
 

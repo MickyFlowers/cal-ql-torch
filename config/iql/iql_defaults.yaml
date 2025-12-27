@@ -1,0 +1,20 @@
+# IQL (Implicit Q-Learning) hyperparameters
+# Reference: https://github.com/ikostrikov/implicit_q_learning
+
+# Learning rates
+policy_lr: 3e-4
+qf_lr: 3e-4
+vf_lr: 3e-4
+
+# IQL-specific hyperparameters
+expectile: 0.7       # τ for expectile regression (0.5 = symmetric, >0.5 focuses on high values)
+beta: 3.0            # Temperature for advantage-weighted regression (AWR)
+clip_score: 100.0    # Maximum weight for AWR
+
+# Q-learning hyperparameters
+discount: 0.99
+soft_target_update_rate: 0.005  # τ for target network soft updates
+target_update_interval: 1
+
+# Gradient clipping
+max_grad_norm: 1.0
