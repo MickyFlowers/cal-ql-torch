@@ -61,6 +61,11 @@ def denormalize(data, statistics, norm_type, epsilon=1e-6):
 @hydra.main(config_path="../config", config_name="rollout_flow_matching", version_base=None)
 def main(config):
     env = gym.make("ur_env_v0", config=config.env)
+
+    # Success/failure counters
+    success_count = 0
+    failure_count = 0
+
     try:
         image_transform = transforms.Compose([
             transforms.Resize((config.image_resize, config.image_resize)),
@@ -130,13 +135,15 @@ def main(config):
             os.makedirs(config.save_path, exist_ok=True)
             saver = HDF5BlockSaver(config.save_path, idx=config.get('episode_idx', 0))
 
-        observation = env.reset()
+        
         step_count = 0
 
         # Velocity horizon buffer
         velocity_horizon = None
         horizon_idx = 0
-
+        env.reset()
+        env.regrasp()
+        env.reset()
         while True:
             start_time = time.time()
             observation = env.get_observation()
@@ -192,6 +199,24 @@ def main(config):
             if elapsed_time < 1.0 / config.freq:
                 time.sleep(1.0 / config.freq - elapsed_time)
 
+            # Check keyboard feedback
+            key = env.get_key()
+            if key == 's':
+                success_count += 1
+                print(f"\n[SUCCESS] Total: success={success_count}, failure={failure_count}")
+            elif key == 'f':
+                failure_count += 1
+                print(f"\n[FAILURE] Total: success={success_count}, failure={failure_count}")
+                print("Resetting environment...")
+                env.reset()
+                env.regrasp()
+                env.reset()
+                step_count = 0
+                # Reset velocity horizon buffer
+                velocity_horizon = None
+                horizon_idx = 0
+                print("Environment reset complete. Continuing rollout...")
+
             if step_count >= config.max_steps:
                 break
 
@@ -199,8 +224,9 @@ def main(config):
         if saver is not None:
             saver.save_episode()
             print(f"Episode saved to {config.save_path}")
+        print(f"\nFinal results: success={success_count}, failure={failure_count}")
         env.regrasp()
-        
+
     except Exception as e:
         traceback.print_exc()
     finally:

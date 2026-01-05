@@ -108,6 +108,10 @@ class UrEnv(gym.Env):
         """Get SpaceMouse twist and enable state."""
         return self.space_mouse_twist.copy(), self.enable_teleop
 
+    def get_key(self):
+        """Get keyboard input (non-blocking)."""
+        return self.keyboard_reader.get_key()
+
     def _spin(self):
         rospy.spin()
 
