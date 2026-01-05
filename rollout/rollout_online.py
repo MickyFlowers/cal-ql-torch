@@ -160,9 +160,8 @@ def main(config):
                     velocity = space_mouse_twist * config.env.teleop_twist_scale
                 else:
                     # Policy mode: get velocity from policy
-                    jnt_obs = observation["jnt_obs"]
-                    tcp_obs = observation["tcp_obs"]
-                    proprio = np.concatenate([jnt_obs, tcp_obs], axis=-1)
+                    # Use ft_obs as proprio (same as training dataset)
+                    proprio = observation["ft_obs"]
                     proprio = normalize(proprio, statistics['proprio'], config.proprio_norm_type)
                     proprio_tensor = torch.tensor(
                         proprio, dtype=torch.float32

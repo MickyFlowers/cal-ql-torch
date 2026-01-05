@@ -11,6 +11,7 @@ PyTorch implementation of offline and online reinforcement learning algorithms f
 | **TD3+BC** | TD3 with Behavior Cloning for offline RL | `td3/train_td3bc.py` |
 | **BC** | Behavior Cloning (imitation learning) | `cal_ql/train_bc.py` |
 | **ACT** | Action Chunking with Transformers | `act/train.py` |
+| **Flow Matching** | Flow Matching Policy for action prediction | `flow_matching/train.py` |
 | **Diffusion Policy** | Diffusion-based policy for action prediction | `diffusion_policy/train.py` |
 
 ## Installation
@@ -115,6 +116,16 @@ Key parameters:
 - `act.hidden_dim`: Hidden dimension (default: 512)
 - `act.chunk_size`: Action chunk size (default: 30)
 - `act.kl_weight`: KL divergence weight (default: 10.0)
+
+### Flow Matching Policy Training
+
+```bash
+# Single GPU
+bash scripts/train_flow_matching.sh
+
+# Multi-GPU
+NUM_GPUS=2 bash scripts/train_flow_matching.sh
+```
 
 ### Diffusion Policy Training
 
@@ -248,6 +259,88 @@ bash scripts/train_bc.sh learning_rate=1e-4 batch_size=16
 Training logs are saved to:
 - **WandB**: Set `logging.online=true` to enable
 - **Local**: Saved to `logging.output_dir` (default: `./experiment_output`)
+
+## Training Examples
+
+Below are example commands for training different algorithms with recommended hyperparameters:
+
+### ACT (Large Model)
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m act.train \
+    dataset.root_path='/path/to/dataset/' \
+    logging.output_dir='./experiment_output' \
+    logging.online=true \
+    logging.prefix='act_large' \
+    act.hidden_dim=768 \
+    act.latent_dim=64 \
+    act.chunk_size=50 \
+    act.num_encoder_layers=6 \
+    act.num_decoder_layers=6 \
+    act.num_heads=12 \
+    act.dim_feedforward=3072 \
+    act.lr=5e-6 \
+    act.kl_weight=10.0 \
+    batch_size=64 \
+    num_workers=8 \
+    device=cuda:0 \
+    num_epochs=200 \
+    save_every_n_epoch=50 \
+    log_every_n_step=100 \
+    eval_every_n_epochs=50
+```
+
+### Flow Matching Policy
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m flow_matching.train \
+    dataset.root_path='/path/to/dataset/' \
+    logging.output_dir='./experiment_output' \
+    logging.online=true \
+    logging.prefix='flow_matching' \
+    batch_size=64 \
+    num_workers=8 \
+    device=cuda:0 \
+    max_epochs=200 \
+    save_every_n_epoch=50 \
+    log_every_n_step=100 \
+    eval_every_n_epochs=50
+```
+
+### Behavior Cloning (BC)
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python -m cal_ql.train_bc \
+    dataset.root_path='/path/to/dataset/' \
+    logging.output_dir='./experiment_output' \
+    logging.online=true \
+    torch_compile_mode='disable' \
+    logging.prefix='bc' \
+    learning_rate=1e-5 \
+    batch_size=64 \
+    num_workers=16 \
+    device=cuda:0 \
+    train_policy_backbone=true \
+    train_bc_epochs=300 \
+    save_every_n_epoch=50 \
+    eval_every_n_epochs=50 \
+    log_every_n_step=100
+```
+
+### Running Multiple Trainings in Parallel
+
+You can run multiple training jobs on different GPUs simultaneously:
+
+```bash
+# GPU 0: BC training
+CUDA_VISIBLE_DEVICES=0 nohup python -m cal_ql.train_bc ... > logs/train_bc.log 2>&1 &
+
+# GPU 1: ACT training
+CUDA_VISIBLE_DEVICES=1 nohup python -m act.train ... > logs/train_act.log 2>&1 &
+
+# GPU 2: Flow Matching training
+CUDA_VISIBLE_DEVICES=2 nohup python -m flow_matching.train ... > logs/train_flow.log 2>&1 &
+```
 
 ## License
 

@@ -132,10 +132,8 @@ def main(config):
         while True:
             start_time = time.time()
             observation = env.get_observation()
-            # Extract observations
-            jnt_obs = observation["jnt_obs"]
-            tcp_obs = observation["tcp_obs"]
-            proprio = np.concatenate([jnt_obs, tcp_obs], axis=-1)
+            # Extract observations - use ft_obs as proprio (same as training dataset)
+            proprio = observation["ft_obs"]
 
             # Normalize proprioception
             proprio = normalize(proprio, statistics['proprio'], config.proprio_norm_type)
