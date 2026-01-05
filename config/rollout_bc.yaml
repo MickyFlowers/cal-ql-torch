@@ -32,3 +32,8 @@ action_norm_type: max_min
 num_episodes: 10
 max_steps: 1000
 freq: 30  # Control loop frequency in Hz
+
+# Data saving
+save_data: false
+save_path: ./rollout_bc
+episode_idx: 0

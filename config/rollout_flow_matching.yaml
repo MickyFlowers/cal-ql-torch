@@ -46,3 +46,8 @@ action_horizon_steps: 8
 num_episodes: 10
 max_steps: 300
 freq: 10  # Control loop frequency in Hz
+
+# Data saving
+save_data: false
+save_path: ./rollout_flow
+episode_idx: 0

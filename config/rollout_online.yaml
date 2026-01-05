@@ -16,6 +16,7 @@ device: cuda:0
 proprio_norm_type: max_min
 action_norm_type: max_min
 dt: 0.01
+freq: 30  # Control loop frequency in Hz
 image_resize: 256
 image_size: 224
 ckpt_download_interval: 5

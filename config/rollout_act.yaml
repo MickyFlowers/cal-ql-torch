@@ -38,3 +38,8 @@ temporal_decay: 0.01
 num_episodes: 10
 max_steps: 300
 freq: 10  # Control loop frequency in Hz
+
+# Data saving
+save_data: false
+save_path: ./rollout_act
+episode_idx: 0

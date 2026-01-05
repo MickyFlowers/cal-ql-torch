@@ -6,6 +6,7 @@ Supports temporal ensemble for smoother velocity execution.
 The policy outputs velocity commands directly.
 """
 
+import os
 import time
 import traceback
 
@@ -16,6 +17,7 @@ import torch
 import torchvision.transforms as transforms
 import yaml
 from xlib.algo.utils.image_utils import np_buffer_to_pil_image
+from xlib.data.hdf5_saver import HDF5BlockSaver
 
 import env
 from act.act_model import ACTPolicy, TemporalEnsemble
@@ -107,6 +109,12 @@ def main(config):
                 decay=config.temporal_decay,
             )
 
+        # Setup data saver if save_data is enabled
+        saver = None
+        if config.get('save_data', False):
+            os.makedirs(config.save_path, exist_ok=True)
+            saver = HDF5BlockSaver(config.save_path, idx=config.get('episode_idx', 0))
+
         observation = env.reset()
         step_count = 0
 
@@ -165,6 +173,14 @@ def main(config):
             # Execute velocity command
             env.action(velocity)
 
+            # Save data if enabled
+            if saver is not None:
+                record_data = {
+                    "observations": observation,
+                    "action": velocity,
+                }
+                saver.add_frame(record_data)
+
             step_count += 1
 
             # Control execution frequency
@@ -175,9 +191,17 @@ def main(config):
             if step_count >= config.max_steps:
                 break
 
+        # Save episode if data saving is enabled
+        if saver is not None:
+            saver.save_episode()
+            print(f"Episode saved to {config.save_path}")
+        env.regrasp()
+
     except Exception as e:
         traceback.print_exc()
     finally:
+        if saver is not None:
+            saver.stop()
         env.close()
 
 
