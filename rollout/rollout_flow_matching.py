@@ -1,7 +1,7 @@
 """
-Diffusion Policy Rollout with Velocity Control
+Flow Matching Policy Rollout with Velocity Control
 
-Rollout script for deploying Diffusion Policy in the UR robot environment.
+Rollout script for deploying Flow Matching Policy in the UR robot environment.
 Uses EMA model for inference and supports velocity horizon prediction.
 The policy outputs velocity commands directly.
 """
@@ -18,7 +18,7 @@ import yaml
 from xlib.algo.utils.image_utils import np_buffer_to_pil_image
 
 import env
-from model.diffusion_policy import DiffusionPolicy
+from model.flow_matching_policy import FlowMatchingPolicy
 from model.vision_model import VitFeatureExtractor
 
 
@@ -56,7 +56,7 @@ def denormalize(data, statistics, norm_type, epsilon=1e-6):
     return data
 
 
-@hydra.main(config_path="../config", config_name="rollout_diffusion", version_base=None)
+@hydra.main(config_path="../config", config_name="rollout_flow_matching", version_base=None)
 def main(config):
     env = gym.make("ur_env_v0", config=config.env)
     try:
@@ -96,11 +96,11 @@ def main(config):
             print("Loaded vision encoder weights")
         vision_encoder.eval()
 
-        # Create diffusion policy
-        policy = DiffusionPolicy(
+        # Create flow matching policy
+        policy = FlowMatchingPolicy(
             action_dim=config.action_dim,
             pred_horizon=config.pred_horizon,
-            config=config.dp_config,
+            config=config.fm_config,
             img_token_dim=config.img_token_dim,
             state_token_dim=config.state_token_dim,
             img_cond_len=config.img_cond_len,

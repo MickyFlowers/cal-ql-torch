@@ -34,12 +34,11 @@ def calc_statics(data_root, episode_files):
     proprio_max = None
     proprio_min = None
     action_max = None
-    action_min = None   
-    for file in episode_files:
+    action_min = None
+    for file in tqdm(episode_files):
         with h5py.File(file, 'r') as f:
-            jnt_obs_sum = np.array(f['observations']['jnt_obs'][:])
-            tcp_obs_sum = np.array(f['observations']['tcp_obs'][:])
-            proprio = np.concatenate([jnt_obs_sum, tcp_obs_sum], axis=-1)
+            ft_obs = np.array(f['observations']['ft_obs'][:])
+            proprio = ft_obs
             if proprio_max is None:
                 proprio_max = np.max(proprio, axis=0)
             else:
@@ -153,13 +152,11 @@ class CalqlDataset(Dataset):
         episode_file = self.episode_files[episode_idx]
         with h5py.File(episode_file, 'r') as f:
             observations = f['observations']
-            jnt_obs = observations['jnt_obs']
-            tcp_obs = observations['tcp_obs']
+            ft_obs = observations['ft_obs']
             images = observations['img_obs']
             actions = f['actions']
             next_observations = f['next_observations']
-            next_jnt_obs = next_observations['jnt_obs']
-            next_tcp_obs = next_observations['tcp_obs']
+            next_ft_obs = next_observations['ft_obs']
             next_images = next_observations['img_obs']
             rewards = f['rewards'][:]
             rewards = rewards * self.config.reward_scale + self.config.reward_bias
@@ -169,15 +166,11 @@ class CalqlDataset(Dataset):
                 success = False
 
             dones = f['dones']
-        
-            episode_length = jnt_obs.shape[0]
-            
-            jnt = jnt_obs[sample_idx]
-            tcp = tcp_obs[sample_idx]
-            next_jnt = next_jnt_obs[sample_idx]
-            next_tcp = next_tcp_obs[sample_idx]
-            proprio = np.concatenate([jnt, tcp], axis=-1)
-            next_proprio = np.concatenate([next_jnt, next_tcp], axis=-1)
+
+            episode_length = ft_obs.shape[0]
+
+            proprio = ft_obs[sample_idx]
+            next_proprio = next_ft_obs[sample_idx]
             image = images[sample_idx]
             next_image = next_images[sample_idx]
             image: Image.Image = np_buffer_to_pil_image(image)
@@ -215,7 +208,8 @@ class CalqlDataset(Dataset):
         }
         return sample
     
-class DiffusionPolicyDataset(Dataset):
+class FlowMatchingDataset(Dataset):
+    """Dataset for Flow Matching Policy training with action chunks."""
     def __init__(self, config: DictConfig):
         super().__init__()
         self.config = config
@@ -293,13 +287,10 @@ class DiffusionPolicyDataset(Dataset):
         episode_file = self.episode_files[episode_idx]
         with h5py.File(episode_file, 'r') as f:
             observations = f['observations']
-            jnt_obs = observations['jnt_obs']
-            tcp_obs = observations['tcp_obs']
+            ft_obs = observations['ft_obs']
             images = observations['img_obs']
             actions = f['actions']
-            jnt = jnt_obs[sample_idx]
-            tcp = tcp_obs[sample_idx]
-            proprio = np.concatenate([jnt, tcp], axis=-1)
+            proprio = ft_obs[sample_idx]
             image = images[sample_idx]
             image: Image.Image = np_buffer_to_pil_image(image)
             image = self.image_transform(image)
@@ -521,19 +512,17 @@ def convert_hdf5_to_lmdb(data_root, lmdb_path, episode_files, config):
         for ep_idx, episode_file in enumerate(tqdm(episode_files)):
             with h5py.File(episode_file, 'r') as f:
                 observations = f['observations']
-                jnt_obs = observations['jnt_obs'][:]
-                tcp_obs = observations['tcp_obs'][:]
+                ft_obs = observations['ft_obs'][:]
                 images = observations['img_obs'][:]
                 actions = f['actions'][:]
                 next_observations = f['next_observations']
-                next_jnt_obs = next_observations['jnt_obs'][:]
-                next_tcp_obs = next_observations['tcp_obs'][:]
+                next_ft_obs = next_observations['ft_obs'][:]
                 next_images = next_observations['img_obs'][:]
                 rewards = f['rewards'][:]
                 rewards = rewards * config.reward_scale + config.reward_bias
                 dones = f['dones'][:]
 
-                episode_length = jnt_obs.shape[0]
+                episode_length = ft_obs.shape[0]
                 episode_lengths.append(episode_length)
                 success = 1.0 if rewards[-1] == 1.0 else 0.0
 
@@ -546,8 +535,8 @@ def convert_hdf5_to_lmdb(data_root, lmdb_path, episode_files, config):
 
                 # Store each sample
                 for sample_idx in range(episode_length):
-                    proprio = np.concatenate([jnt_obs[sample_idx], tcp_obs[sample_idx]], axis=-1)
-                    next_proprio = np.concatenate([next_jnt_obs[sample_idx], next_tcp_obs[sample_idx]], axis=-1)
+                    proprio = ft_obs[sample_idx]
+                    next_proprio = next_ft_obs[sample_idx]
 
                     sample = {
                         'proprio': proprio.astype(np.float32),
@@ -614,20 +603,16 @@ class CalqlDatasetLMDB(Dataset):
         self.statics_file = os.path.join(self.root_path, "statistics.yaml")
         self.statistics = self._parser_statstics(self.statics_file)
 
-        # Open LMDB environment (read-only)
-        self.env = lmdb.open(
-            self.lmdb_path,
-            readonly=True,
-            lock=False,
-            readahead=True,
-            meminit=False
-        )
+        # Lazy initialization for LMDB environment (for multiprocessing compatibility)
+        self.env = None
 
-        # Load metadata
-        with self.env.begin() as txn:
+        # Load metadata using temporary env
+        tmp_env = lmdb.open(self.lmdb_path, readonly=True, lock=False)
+        with tmp_env.begin() as txn:
             meta = pickle.loads(txn.get(b'__meta__'))
             self.total_samples = meta['total_samples']
             self.episode_lengths = meta['episode_lengths']
+        tmp_env.close()
 
         self.image_transform = transforms.Compose([
             transforms.Resize((config.image_resize, config.image_resize)),
@@ -647,6 +632,17 @@ class CalqlDatasetLMDB(Dataset):
                 std=[0.229, 0.224, 0.225]
             ),
         ])
+
+    def _init_env(self):
+        """Lazy initialization of LMDB environment for multiprocessing compatibility."""
+        if self.env is None:
+            self.env = lmdb.open(
+                self.lmdb_path,
+                readonly=True,
+                lock=False,
+                readahead=True,
+                meminit=False
+            )
 
     def _parser_statstics(self, statics_file: str):
         with open(statics_file, 'r') as f:
@@ -668,6 +664,8 @@ class CalqlDatasetLMDB(Dataset):
         return data
 
     def __getitem__(self, index):
+        # Lazy init LMDB env (for multiprocessing DataLoader)
+        self._init_env()
         # Read from LMDB
         with self.env.begin() as txn:
             key = f'{index:09d}'.encode()
@@ -707,30 +705,33 @@ class CalqlDatasetLMDB(Dataset):
         }
 
     def __del__(self):
-        if hasattr(self, 'env'):
+        if hasattr(self, 'env') and self.env is not None:
             self.env.close()
 
 
-class DiffusionPolicyDatasetLMDB(Dataset):
+class BCDatasetLMDB(Dataset):
     """
-    LMDB-optimized version of DiffusionPolicyDataset for faster data loading.
+    Lightweight LMDB dataset specifically optimized for Behavior Cloning.
+
+    Key optimizations compared to CalqlDatasetLMDB:
+    1. Only loads single frame (no next_image, next_proprio)
+    2. No reward/done/mc_return/success fields
+    3. Smaller LMDB records = faster I/O
+    4. Single image transform = half the CPU overhead
     """
 
     def __init__(self, config: DictConfig):
         super().__init__()
         self.config = config
         self.root_path = config.root_path
-        self.horizon = config.horizon
-        self.lmdb_path = os.path.join(self.root_path, "lmdb_cache_diffusion")
+        self.lmdb_path = os.path.join(self.root_path, "lmdb_cache_bc")
 
         # Check if LMDB cache exists
         if not os.path.exists(self.lmdb_path):
-            # Convert HDF5 to LMDB
             episode_files = sorted(glob.glob(os.path.join(self.root_path, "*.hdf5")))
             if not episode_files:
                 raise ValueError(f"No HDF5 files found in {self.root_path}")
 
-            # Calculate statistics first
             calc_statics(self.root_path, episode_files)
             self.total_samples, self.episode_lengths = self._convert_to_lmdb(episode_files)
         else:
@@ -740,20 +741,16 @@ class DiffusionPolicyDatasetLMDB(Dataset):
         self.statics_file = os.path.join(self.root_path, "statistics.yaml")
         self.statistics = self._parser_statstics(self.statics_file)
 
-        # Open LMDB environment (read-only)
-        self.env = lmdb.open(
-            self.lmdb_path,
-            readonly=True,
-            lock=False,
-            readahead=True,
-            meminit=False
-        )
+        # Lazy initialization for LMDB environment (for multiprocessing compatibility)
+        self.env = None
 
-        # Load metadata
-        with self.env.begin() as txn:
+        # Load metadata using temporary env
+        tmp_env = lmdb.open(self.lmdb_path, readonly=True, lock=False)
+        with tmp_env.begin() as txn:
             meta = pickle.loads(txn.get(b'__meta__'))
             self.total_samples = meta['total_samples']
             self.episode_lengths = meta['episode_lengths']
+        tmp_env.close()
 
         self.image_transform = transforms.Compose([
             transforms.Resize((config.image_resize, config.image_resize)),
@@ -775,6 +772,185 @@ class DiffusionPolicyDatasetLMDB(Dataset):
         ])
 
     def _convert_to_lmdb(self, episode_files):
+        """Convert HDF5 files to LMDB format (BC-optimized: single frame only)."""
+        map_size = 50 * 1024 * 1024 * 1024  # 50GB (smaller than CalqlDatasetLMDB)
+        env = lmdb.open(self.lmdb_path, map_size=map_size)
+
+        total_samples = 0
+        episode_lengths = []
+
+        print("Converting HDF5 to LMDB for BC...")
+
+        with env.begin(write=True) as txn:
+            for ep_idx, episode_file in enumerate(tqdm(episode_files)):
+                with h5py.File(episode_file, 'r') as f:
+                    observations = f['observations']
+                    ft_obs = observations['ft_obs'][:]
+                    images = observations['img_obs'][:]
+                    actions = f['actions'][:]
+
+                    episode_length = ft_obs.shape[0]
+                    episode_lengths.append(episode_length)
+
+                    for i in range(episode_length):
+                        # Only store current frame data (no next frame)
+                        sample = {
+                            'proprio': ft_obs[i].astype(np.float32),
+                            'image': images[i],
+                            'action': actions[i].astype(np.float32),
+                        }
+
+                        key = f'{total_samples:09d}'.encode()
+                        value = pickle.dumps(sample)
+                        txn.put(key, value)
+                        total_samples += 1
+
+            # Store metadata
+            meta = {
+                'total_samples': total_samples,
+                'episode_lengths': episode_lengths,
+            }
+            txn.put(b'__meta__', pickle.dumps(meta))
+
+        env.close()
+        print(f"Converted {total_samples} samples to LMDB at {self.lmdb_path}")
+        return total_samples, episode_lengths
+
+    def _init_env(self):
+        """Lazy initialization of LMDB environment for multiprocessing compatibility."""
+        if self.env is None:
+            self.env = lmdb.open(
+                self.lmdb_path,
+                readonly=True,
+                lock=False,
+                readahead=True,
+                meminit=False
+            )
+
+    def _parser_statstics(self, statics_file: str):
+        with open(statics_file, 'r') as f:
+            statistics = yaml.safe_load(f)
+        return statistics
+
+    def __len__(self):
+        return self.total_samples
+
+    def _normalize(self, data, statistics, norm_type, epsilon=1e-6):
+        if norm_type == 'max_min':
+            data_max = np.array(statistics['max']) + epsilon
+            data_min = np.array(statistics['min']) - epsilon
+            data = ((data - data_min) / (data_max - data_min) * 2.0) - 1.0
+        elif norm_type == 'mean_std':
+            data_mean = np.array(statistics['mean'])
+            data_std = np.array(statistics['std'])
+            data = (data - data_mean) / data_std
+        return data
+
+    def __getitem__(self, index):
+        # Lazy init LMDB env (for multiprocessing DataLoader)
+        self._init_env()
+        # Read from LMDB
+        with self.env.begin() as txn:
+            key = f'{index:09d}'.encode()
+            value = txn.get(key)
+            if value is None:
+                raise IndexError(f"Index {index} not found in LMDB")
+            sample = pickle.loads(value)
+
+        # Normalize (only 2 normalizations vs 3 in CalqlDatasetLMDB)
+        proprio = self._normalize(sample['proprio'], self.statistics['proprio'], self.config.norm_type)
+        action = self._normalize(sample['action'], self.statistics['action'], self.config.norm_type)
+
+        # Transform image (only 1 image vs 2 in CalqlDatasetLMDB)
+        image = np_buffer_to_pil_image(sample['image'])
+        image = self.image_transform(image)
+
+        observations = {
+            'proprio': proprio.astype(np.float32),
+            'image': image,
+        }
+
+        return {
+            'observations': observations,
+            'action': action.astype(np.float32),
+        }
+
+    def __del__(self):
+        if hasattr(self, 'env') and self.env is not None:
+            self.env.close()
+
+
+class FlowMatchingDatasetLMDB(Dataset):
+    """
+    LMDB-optimized version of FlowMatchingDataset for faster data loading.
+    """
+
+    def __init__(self, config: DictConfig):
+        super().__init__()
+        self.config = config
+        self.root_path = config.root_path
+        self.horizon = config.horizon
+        self.lmdb_path = os.path.join(self.root_path, "lmdb_cache_flow_matching")
+
+        # Check if LMDB cache exists
+        if not os.path.exists(self.lmdb_path):
+            # Convert HDF5 to LMDB
+            episode_files = sorted(glob.glob(os.path.join(self.root_path, "*.hdf5")))
+            if not episode_files:
+                raise ValueError(f"No HDF5 files found in {self.root_path}")
+
+            # Calculate statistics first
+            calc_statics(self.root_path, episode_files)
+            self.total_samples, self.episode_lengths = self._convert_to_lmdb(episode_files)
+        else:
+            print(f"Loading from existing LMDB cache: {self.lmdb_path}")
+
+        # Load statistics
+        self.statics_file = os.path.join(self.root_path, "statistics.yaml")
+        self.statistics = self._parser_statstics(self.statics_file)
+
+        # Lazy initialization for LMDB environment (for multiprocessing compatibility)
+        self.env = None
+
+        # Load metadata using temporary env
+        tmp_env = lmdb.open(self.lmdb_path, readonly=True, lock=False)
+        with tmp_env.begin() as txn:
+            meta = pickle.loads(txn.get(b'__meta__'))
+            self.total_samples = meta['total_samples']
+            self.episode_lengths = meta['episode_lengths']
+        tmp_env.close()
+
+        self.image_transform = transforms.Compose([
+            transforms.Resize((config.image_resize, config.image_resize)),
+            transforms.RandomCrop(config.image_size),
+            transforms.ColorJitter(
+                brightness=0.2,
+                contrast=0.2,
+                saturation=0.2,
+                hue=0.05
+            ),
+            transforms.ToTensor(),
+            transforms.Lambda(
+                lambda x: x + 0.01 * torch.randn_like(x)
+            ),
+            transforms.Normalize(
+                mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225]
+            ),
+        ])
+
+    def _init_env(self):
+        """Lazy initialization of LMDB environment for multiprocessing compatibility."""
+        if self.env is None:
+            self.env = lmdb.open(
+                self.lmdb_path,
+                readonly=True,
+                lock=False,
+                readahead=True,
+                meminit=False
+            )
+
+    def _convert_to_lmdb(self, episode_files):
         """Convert HDF5 files to LMDB format."""
         map_size = 100 * 1024 * 1024 * 1024  # 100GB
         env = lmdb.open(self.lmdb_path, map_size=map_size)
@@ -782,23 +958,22 @@ class DiffusionPolicyDatasetLMDB(Dataset):
         total_samples = 0
         episode_lengths = []
 
-        print("Converting HDF5 to LMDB for DiffusionPolicy...")
+        print("Converting HDF5 to LMDB for FlowMatching...")
 
         with env.begin(write=True) as txn:
             for ep_idx, episode_file in enumerate(tqdm(episode_files)):
                 with h5py.File(episode_file, 'r') as f:
                     observations = f['observations']
-                    jnt_obs = observations['jnt_obs'][:]
-                    tcp_obs = observations['tcp_obs'][:]
+                    ft_obs = observations['ft_obs'][:]
                     images = observations['img_obs'][:]
                     actions = f['actions'][:]
 
-                    episode_length = jnt_obs.shape[0]
+                    episode_length = ft_obs.shape[0]
                     episode_lengths.append(episode_length)
 
                     # Store each sample with action chunks
                     for sample_idx in range(episode_length):
-                        proprio = np.concatenate([jnt_obs[sample_idx], tcp_obs[sample_idx]], axis=-1)
+                        proprio = ft_obs[sample_idx]
 
                         # Get action chunk
                         action_chunk = actions[sample_idx: sample_idx + self.horizon]
@@ -849,6 +1024,8 @@ class DiffusionPolicyDatasetLMDB(Dataset):
         return data
 
     def __getitem__(self, index):
+        # Lazy init LMDB env (for multiprocessing DataLoader)
+        self._init_env()
         # Read from LMDB
         with self.env.begin() as txn:
             key = f'{index:09d}'.encode()
@@ -876,14 +1053,14 @@ class DiffusionPolicyDatasetLMDB(Dataset):
         }
 
     def __del__(self):
-        if hasattr(self, 'env'):
+        if hasattr(self, 'env') and self.env is not None:
             self.env.close()
 
 
 class ACTDataset(Dataset):
     """
     Dataset for ACT (Action Chunking with Transformers) training.
-    Similar to DiffusionPolicyDataset but returns action chunks.
+    Similar to FlowMatchingDataset but returns action chunks.
     """
 
     def __init__(self, config: DictConfig):
@@ -910,9 +1087,8 @@ class ACTDataset(Dataset):
 
         # Get dimensions from first sample
         with h5py.File(self.episode_files[0], 'r') as f:
-            jnt_obs = f['observations']['jnt_obs'][0]
-            tcp_obs = f['observations']['tcp_obs'][0]
-            self.proprio_dim = jnt_obs.shape[-1] + tcp_obs.shape[-1]
+            ft_obs = f['observations']['ft_obs'][0]
+            self.proprio_dim = ft_obs.shape[-1]
             self.action_dim = f['actions'][0].shape[-1]
 
         self.image_transform = transforms.Compose([
@@ -966,14 +1142,11 @@ class ACTDataset(Dataset):
 
         with h5py.File(episode_file, 'r') as f:
             observations = f['observations']
-            jnt_obs = observations['jnt_obs']
-            tcp_obs = observations['tcp_obs']
+            ft_obs = observations['ft_obs']
             images = observations['img_obs']
             actions = f['actions']
 
-            jnt = jnt_obs[sample_idx]
-            tcp = tcp_obs[sample_idx]
-            proprio = np.concatenate([jnt, tcp], axis=-1)
+            proprio = ft_obs[sample_idx]
             image = images[sample_idx]
 
             # Get action chunk
@@ -1029,22 +1202,18 @@ class ACTDatasetLMDB(Dataset):
         self.statics_file = os.path.join(self.root_path, "statistics.yaml")
         self.statistics = self._parser_statstics(self.statics_file)
 
-        # Open LMDB environment
-        self.env = lmdb.open(
-            self.lmdb_path,
-            readonly=True,
-            lock=False,
-            readahead=True,
-            meminit=False
-        )
+        # Lazy initialization for LMDB environment (for multiprocessing compatibility)
+        self.env = None
 
-        # Load metadata
-        with self.env.begin() as txn:
+        # Load metadata using temporary env
+        tmp_env = lmdb.open(self.lmdb_path, readonly=True, lock=False)
+        with tmp_env.begin() as txn:
             meta = pickle.loads(txn.get(b'__meta__'))
             self.total_samples = meta['total_samples']
             self.episode_lengths = meta['episode_lengths']
             self.proprio_dim = meta['proprio_dim']
             self.action_dim = meta['action_dim']
+        tmp_env.close()
 
         self.image_transform = transforms.Compose([
             transforms.Resize((config.image_resize, config.image_resize)),
@@ -1065,6 +1234,17 @@ class ACTDatasetLMDB(Dataset):
             ),
         ])
 
+    def _init_env(self):
+        """Lazy initialization of LMDB environment for multiprocessing compatibility."""
+        if self.env is None:
+            self.env = lmdb.open(
+                self.lmdb_path,
+                readonly=True,
+                lock=False,
+                readahead=True,
+                meminit=False
+            )
+
     def _convert_to_lmdb(self, episode_files):
         """Convert HDF5 files to LMDB format."""
         map_size = 100 * 1024 * 1024 * 1024
@@ -1081,20 +1261,19 @@ class ACTDatasetLMDB(Dataset):
             for ep_idx, episode_file in enumerate(tqdm(episode_files)):
                 with h5py.File(episode_file, 'r') as f:
                     observations = f['observations']
-                    jnt_obs = observations['jnt_obs'][:]
-                    tcp_obs = observations['tcp_obs'][:]
+                    ft_obs = observations['ft_obs'][:]
                     images = observations['img_obs'][:]
                     actions = f['actions'][:]
 
                     if proprio_dim is None:
-                        proprio_dim = jnt_obs.shape[-1] + tcp_obs.shape[-1]
+                        proprio_dim = ft_obs.shape[-1]
                         action_dim = actions.shape[-1]
 
-                    episode_length = jnt_obs.shape[0]
+                    episode_length = ft_obs.shape[0]
                     episode_lengths.append(episode_length)
 
                     for sample_idx in range(episode_length):
-                        proprio = np.concatenate([jnt_obs[sample_idx], tcp_obs[sample_idx]], axis=-1)
+                        proprio = ft_obs[sample_idx]
 
                         action_chunk = actions[sample_idx: sample_idx + self.chunk_size]
                         if action_chunk.shape[0] < self.chunk_size:
@@ -1145,6 +1324,8 @@ class ACTDatasetLMDB(Dataset):
         return data
 
     def __getitem__(self, index):
+        # Lazy init LMDB env (for multiprocessing DataLoader)
+        self._init_env()
         with self.env.begin() as txn:
             key = f'{index:09d}'.encode()
             value = txn.get(key)
@@ -1169,7 +1350,7 @@ class ACTDatasetLMDB(Dataset):
         }
 
     def __del__(self):
-        if hasattr(self, 'env'):
+        if hasattr(self, 'env') and self.env is not None:
             self.env.close()
 
 

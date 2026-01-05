@@ -4,7 +4,7 @@ defaults:
   - dataset: dataset_defaults
   - env: env
 
-observation_dim: 12  # jnt_obs(6) + tcp_obs(6)
+observation_dim: 6  # ft_obs(6)
 action_dim: 6
 
 seed: 42

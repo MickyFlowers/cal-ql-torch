@@ -1,12 +1,12 @@
 """
-Diffusion Policy Training Script
+Flow Matching Policy Training Script
 
-Train Diffusion Policy for action prediction with transformer-based denoising.
+Train Flow Matching Policy for action prediction with transformer-based flow prediction.
 Supports both single-GPU and multi-GPU (distributed) training automatically.
 
 Usage:
-    Single GPU:  python -m diffusion_policy.train [args]
-    Multi GPU:   torchrun --nproc_per_node=N -m diffusion_policy.train [args]
+    Single GPU:  python -m flow_matching.train [args]
+    Multi GPU:   torchrun --nproc_per_node=N -m flow_matching.train [args]
 """
 
 import os
@@ -20,9 +20,9 @@ from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
-from data.dataset import DiffusionPolicyDataset
-from diffusion_policy.trainer import DiffusionPolicyTrainer
-from model.diffusion_policy import DiffusionPolicy
+from data.dataset import FlowMatchingDataset
+from flow_matching.trainer import FlowMatchingPolicyTrainer
+from model.flow_matching_policy import FlowMatchingPolicy
 from model.vision_model import VitFeatureExtractor
 from utils.distributed import (
     barrier,
@@ -44,7 +44,7 @@ def _dict_to_device(batch, device):
     return batch
 
 
-@hydra.main(config_path="../config", config_name="train_diffusion_policy", version_base=None)
+@hydra.main(config_path="../config", config_name="train_flow_matching", version_base=None)
 def main(cfg: DictConfig):
     # Setup training environment (auto-detects single vs multi GPU)
     local_rank, device, world_size = setup_training(cfg.device)
@@ -72,7 +72,7 @@ def main(cfg: DictConfig):
     # Create dataset
     if is_main_process():
         print(f"Loading dataset from {cfg.dataset.root_path}")
-    dataset = DiffusionPolicyDataset(cfg.dataset)
+    dataset = FlowMatchingDataset(cfg.dataset)
 
     # Create dataloader with optional distributed sampler
     sampler = DistributedSampler(dataset, shuffle=True) if is_distributed else None
@@ -91,10 +91,10 @@ def main(cfg: DictConfig):
         print(f"Batches per epoch{' (per GPU)' if is_distributed else ''}: {len(dataloader)}")
 
     # Create policy
-    policy = DiffusionPolicy(
+    policy = FlowMatchingPolicy(
         action_dim=cfg.action_dim,
         pred_horizon=cfg.pred_horizon,
-        config=cfg.dp_config,
+        config=cfg.fm_config,
         img_token_dim=cfg.img_token_dim,
         state_token_dim=cfg.state_token_dim,
         img_cond_len=cfg.img_cond_len,
@@ -111,7 +111,7 @@ def main(cfg: DictConfig):
     )
 
     # Create trainer and setup device/distributed
-    trainer = DiffusionPolicyTrainer(policy, vision_encoder, cfg.trainer)
+    trainer = FlowMatchingPolicyTrainer(policy, vision_encoder, cfg.trainer)
     if is_distributed:
         trainer.setup_multi_gpu(local_rank)
     else:
@@ -146,7 +146,7 @@ def main(cfg: DictConfig):
 
         epoch_metrics = {
             'epoch': epoch,
-            'dp/loss': 0,
+            'fm/loss': 0,
         }
         num_batches = 0
 
@@ -171,7 +171,7 @@ def main(cfg: DictConfig):
 
             # Update progress bar
             if is_main_process():
-                loss = metrics['dp/loss'].item() if hasattr(metrics['dp/loss'], 'item') else metrics['dp/loss']
+                loss = metrics['fm/loss'].item() if hasattr(metrics['fm/loss'], 'item') else metrics['fm/loss']
                 pbar.set_postfix({'loss': f"{loss:.4f}"})
 
             # Log per-step metrics (only main process)
@@ -195,14 +195,14 @@ def main(cfg: DictConfig):
         if is_main_process():
             if wandb_logger is not None:
                 wandb_logger.log(epoch_metrics, step=global_step)
-            print(f"Epoch {epoch}: loss={epoch_metrics['dp/loss']:.4f}")
+            print(f"Epoch {epoch}: loss={epoch_metrics['fm/loss']:.4f}")
 
         # Evaluation (only main process)
         if epoch % cfg.eval_every_n_epochs == 0 and is_main_process():
             eval_metrics = trainer.evaluate(dataloader, num_batches=10)
             if wandb_logger is not None:
                 wandb_logger.log(eval_metrics, step=global_step)
-            print(f"  Eval: action_error={eval_metrics['eval/action_error']:.4f}")
+            print(f"  Eval: sample_error={eval_metrics['eval/sample_error']:.4f}")
 
         # Save checkpoint (only main process)
         if epoch % cfg.save_every_n_epoch == 0 and is_main_process():

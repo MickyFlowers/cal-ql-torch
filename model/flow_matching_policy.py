@@ -6,9 +6,6 @@ from typing import Union
 import numpy as np
 import torch
 import torch.nn.functional as F
-from diffusers.schedulers.scheduling_ddpm import DDPMScheduler
-from diffusers.schedulers.scheduling_dpmsolver_multistep import \
-    DPMSolverMultistepScheduler
 from timm.models.vision_transformer import (Attention, Mlp, RmsNorm,
                                             use_fused_attn)
 from torch import nn
@@ -381,12 +378,23 @@ class DiffusionModel(nn.Module):
         return x
 
 
-class DiffusionPolicy(nn.Module):
-    def __init__(self, *, action_dim, pred_horizon, config, 
-                 img_token_dim, state_token_dim, 
+class FlowMatchingPolicy(nn.Module):
+    """
+    Flow Matching Policy for action prediction.
+
+    Flow Matching is a simpler and more efficient alternative to diffusion models.
+    It learns to predict the velocity field v(x_t, t) that transforms noise to data:
+        x_t = (1 - t) * x_0 + t * x_1  (linear interpolation)
+        v = x_1 - x_0  (velocity/flow)
+
+    During training: predict v given x_t and t
+    During inference: integrate ODE from t=0 (noise) to t=1 (data)
+    """
+    def __init__(self, *, action_dim, pred_horizon, config,
+                 img_token_dim, state_token_dim,
                  img_cond_len, img_pos_embed_config=None, dtype=torch.bfloat16):
         super().__init__()
-        # Create diffusion model
+        # Create flow model (reuse DiffusionModel architecture)
         hidden_size = config.hidden_size
         self.model = DiffusionModel(
             output_dim=action_dim,
@@ -399,48 +407,34 @@ class DiffusionPolicy(nn.Module):
             dtype=dtype,
         )
 
-        # Create adpators for various conditional inputs
+        # Create adapters for various conditional inputs
         self.img_adaptor = self.build_condition_adapter(
-            config.img_adaptor, 
-            in_features=img_token_dim, 
+            config.img_adaptor,
+            in_features=img_token_dim,
             out_features=hidden_size
         )
         # A `state` refers to an action or a proprioception vector
         self.state_adaptor = self.build_condition_adapter(
-            config.state_adaptor, 
+            config.state_adaptor,
             in_features=state_token_dim,
             out_features=hidden_size
         )
         self.action_adaptor = self.build_condition_adapter(
-            config.action_adaptor, 
-            in_features=action_dim, 
+            config.action_adaptor,
+            in_features=action_dim,
             out_features=hidden_size
         )
-        
-        # Create the noise scheduler
-        noise_scheduler_config = config.noise_scheduler
-        self.noise_scheduler = DDPMScheduler(
-            num_train_timesteps=noise_scheduler_config.num_train_timesteps,
-            beta_schedule=noise_scheduler_config.beta_schedule,
-            prediction_type=noise_scheduler_config.prediction_type,
-            clip_sample=noise_scheduler_config.clip_sample,
-        )
-        self.noise_scheduler_sample = DPMSolverMultistepScheduler(
-            num_train_timesteps=noise_scheduler_config.num_train_timesteps,
-            beta_schedule=noise_scheduler_config.beta_schedule,
-            prediction_type=noise_scheduler_config.prediction_type,
-        )
 
-        self.num_train_timesteps = noise_scheduler_config.num_train_timesteps
-        self.num_inference_timesteps = noise_scheduler_config.num_inference_timesteps
-        self.prediction_type = noise_scheduler_config.prediction_type
+        # Flow matching parameters
+        self.num_inference_steps = getattr(config, 'num_inference_timesteps', 10)
+        self.sigma_min = getattr(config, 'sigma_min', 1e-4)
 
         self.pred_horizon = pred_horizon
         self.action_dim = action_dim
 
-        print("Diffusion params: %e" % sum(
-            [p.numel() for p in self.model.parameters() if p.requires_grad] + 
-            [p.numel() for p in self.img_adaptor.parameters() if p.requires_grad] + 
+        print("FlowMatching params: %e" % sum(
+            [p.numel() for p in self.model.parameters() if p.requires_grad] +
+            [p.numel() for p in self.img_adaptor.parameters() if p.requires_grad] +
             [p.numel() for p in self.state_adaptor.parameters() if p.requires_grad] +
             [p.numel() for p in self.action_adaptor.parameters() if p.requires_grad]))
     
@@ -463,90 +457,101 @@ class DiffusionPolicy(nn.Module):
             raise ValueError(f'Unknown projector type: {projector_type}')
 
         return projector
-    
-    def adapt_conditions(self, img_tokens, state_tokens, action_tokens=None):
 
-        adpated_img = self.img_adaptor(img_tokens)
-        adpated_state = self.state_adaptor(state_tokens)
+    def adapt_conditions(self, img_tokens, state_tokens, action_tokens=None):
+        adapted_img = self.img_adaptor(img_tokens)
+        adapted_state = self.state_adaptor(state_tokens)
         if action_tokens is not None:
-            adpated_action = self.action_adaptor(action_tokens)
-            return adpated_img, adpated_state, adpated_action
-        return adpated_img, adpated_state
+            adapted_action = self.action_adaptor(action_tokens)
+            return adapted_img, adapted_state, adapted_action
+        return adapted_img, adapted_state
 
     def conditional_sample(self, img_cond, state_traj):
-        
+        """
+        Sample actions using Euler ODE solver for flow matching.
+
+        Flow matching ODE: dx/dt = v(x_t, t)
+        We integrate from t=0 (noise) to t=1 (data) using Euler method.
+        """
         device = state_traj.device
         dtype = state_traj.dtype
-        noisy_action = torch.zeros(
-            size=(state_traj.shape[0], self.pred_horizon, self.action_dim), 
-            dtype=dtype, device=device)
-        
-    
-        # Set step values
-        self.noise_scheduler_sample.set_timesteps(self.num_inference_timesteps)
-        
-        for t in self.noise_scheduler_sample.timesteps:
-            # Prepare state-action trajectory
-            action_traj = noisy_action
-            action_traj = self.action_adaptor(action_traj)
-            state_action_traj = torch.cat([state_traj, action_traj], dim=1)
-            
-            # Predict the model output
-            model_output = self.model(state_action_traj,
-                                    t.unsqueeze(-1).to(device),
-                                    img_cond)
-            
-            # Compute previous actions: x_t -> x_t-1
-            noisy_action = self.noise_scheduler_sample.step(
-                model_output, t, noisy_action).prev_sample
-            noisy_action = noisy_action.to(state_traj.dtype)
-        
-        # Finally apply the action mask to mask invalid action dimensions
-        noisy_action = noisy_action
+        batch_size = state_traj.shape[0]
 
-        return noisy_action
-    
+        # Start from pure noise at t=0
+        x_t = torch.randn(
+            size=(batch_size, self.pred_horizon, self.action_dim),
+            dtype=dtype, device=device)
+
+        # Time steps from 0 to 1
+        dt = 1.0 / self.num_inference_steps
+        timesteps = torch.linspace(0, 1 - dt, self.num_inference_steps, device=device)
+
+        for t in timesteps:
+            # Prepare state-action trajectory
+            action_traj = self.action_adaptor(x_t)
+            state_action_traj = torch.cat([state_traj, action_traj], dim=1)
+
+            # Scale timestep to match training (0-1000 range for timestep embedder)
+            t_scaled = (t * 1000).unsqueeze(0).expand(batch_size)
+
+            # Predict velocity field v(x_t, t)
+            v_pred = self.model(state_action_traj, t_scaled, img_cond)
+
+            # Euler step: x_{t+dt} = x_t + dt * v(x_t, t)
+            x_t = x_t + dt * v_pred
+            x_t = x_t.to(dtype)
+
+        return x_t
+
     # ========= Train  ============
     def compute_loss(self, img_tokens, state_tokens, action_gt) -> torch.Tensor:
+        """
+        Compute Flow Matching loss.
+
+        Flow Matching uses optimal transport conditional flow:
+            x_t = (1 - t) * x_0 + t * x_1
+        where x_0 is noise and x_1 is data (action_gt).
+
+        The target velocity is: v = x_1 - x_0 = action_gt - noise
+        """
         # Ensure state_tokens is 3D: (B, 1, D)
         if state_tokens.dim() == 2:
             state_tokens = state_tokens.unsqueeze(1)
         batch_size = img_tokens.shape[0]
-        device = img_tokens.device  
+        device = img_tokens.device
 
-        # Sample noise that we'll add to the actions
+        # Sample noise (x_0)
         noise = torch.randn(
             action_gt.shape, dtype=action_gt.dtype, device=device
         )
-        # Sample random diffusion timesteps
-        timesteps = torch.randint(
-            0, self.num_train_timesteps, 
-            (batch_size,), device=device
-        ).long()
-        # Add noise to the clean actions according to the noise magnitude at each timestep
-        # (this is the forward diffusion process)
-        noisy_action = self.noise_scheduler.add_noise(
-            action_gt, noise, timesteps)
-        
+
+        # Sample random timesteps t ~ U(0, 1)
+        t = torch.rand(batch_size, device=device)
+
+        # Compute x_t using linear interpolation (optimal transport path)
+        # x_t = (1 - t) * x_0 + t * x_1
+        t_expand = t.view(-1, 1, 1)  # (B, 1, 1) for broadcasting
+        x_t = (1 - t_expand) * noise + t_expand * action_gt
+
+        # Target velocity: v = x_1 - x_0 = action_gt - noise
+        target_velocity = action_gt - noise
+
         # Align the dimension with the hidden size
         img_cond, state_traj, action_traj = self.adapt_conditions(
-            img_tokens, state_tokens, noisy_action)
-        
+            img_tokens, state_tokens, x_t)
+
         state_action_traj = torch.cat([state_traj, action_traj], dim=1)
-        # Predict the denoised result
-        pred = self.model(state_action_traj, timesteps, img_cond)
 
-        pred_type = self.prediction_type 
-        if pred_type == 'epsilon':
-            target = noise
-        elif pred_type == 'sample':
-            target = action_gt
-        else:
-            raise ValueError(f"Unsupported prediction type {pred_type}")
+        # Scale timestep to match timestep embedder (0-1000 range)
+        t_scaled = t * 1000
 
-        loss = F.mse_loss(pred, target)
+        # Predict velocity
+        pred_velocity = self.model(state_action_traj, t_scaled, img_cond)
+
+        # MSE loss on velocity prediction
+        loss = F.mse_loss(pred_velocity, target_velocity)
         return loss
-    
+
     # ========= Inference  ============
     def predict_action(self, img_tokens, state_tokens):
         '''
@@ -559,11 +564,11 @@ class DiffusionPolicy(nn.Module):
         if state_tokens.dim() == 2:
             state_tokens = state_tokens.unsqueeze(1)
         img_cond, state_traj = self.adapt_conditions(img_tokens, state_tokens)
-        
-        # Run sampling
+
+        # Run sampling via ODE integration
         action_pred = self.conditional_sample(img_cond, state_traj)
-        
+
         return action_pred
-    
+
     def forward(self, *args, **kwargs) -> torch.Tensor:
         return self.compute_loss(*args, **kwargs)

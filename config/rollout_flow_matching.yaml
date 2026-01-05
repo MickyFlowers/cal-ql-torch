@@ -1,39 +1,35 @@
-# Diffusion Policy Rollout Configuration
+# Flow Matching Policy Rollout Configuration
 
 defaults:
   - env: env
 
 # Device
 device: cuda:0
+use_bf16: false
 
 # Checkpoint
-ckpt_path: ./checkpoints/diffusion_policy.pth
+ckpt_path: ./checkpoints/flow_matching_policy.pth
 statistics_path: ./dataset/statistics.yaml
 
 # Model architecture (must match training config)
 action_dim: 6
 pred_horizon: 30
 img_token_dim: 192
-state_token_dim: 12
+state_token_dim: 6
 img_cond_len: 196
 img_pos_embed_config: null
 model_name: vit_tiny_patch16_224
-use_bf16: false
 
-dp_config:
+# Flow Matching config (must match training)
+fm_config:
   depth: 8
   num_heads: 8
   hidden_size: 512
   img_adaptor: mlp2x_gelu
   state_adaptor: mlp3x_gelu
   action_adaptor: mlp3x_gelu
-  noise_scheduler:
-    type: ddpm
-    num_train_timesteps: 1000
-    num_inference_timesteps: 5
-    beta_schedule: squaredcos_cap_v2
-    prediction_type: sample
-    clip_sample: false
+  num_inference_timesteps: 10
+  sigma_min: 1e-4
 
 # Image processing
 image_resize: 256
@@ -43,10 +39,10 @@ image_size: 224
 proprio_norm_type: max_min
 action_norm_type: max_min
 
-# Action horizon: how many steps to use from each prediction
+# Action horizon (how many steps to execute before re-planning)
 action_horizon_steps: 8
 
 # Rollout settings
 num_episodes: 10
-max_steps: 1000
-freq: 30  # Control loop frequency in Hz
+max_steps: 300
+freq: 10  # Control loop frequency in Hz

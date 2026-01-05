@@ -21,7 +21,7 @@ from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
 
 from cal_ql.bc_trainer import BehaviorCloneTrainer
-from data.dataset import CalqlDataset
+from data.dataset import BCDatasetLMDB
 from model.model import ResNetPolicy
 from utils.distributed import (
     barrier,
@@ -70,8 +70,8 @@ def main(cfg: DictConfig):
             include_exp_prefix_sub_dir=False,
         )
 
-    # Create dataset
-    dataset = CalqlDataset(cfg.dataset)
+    # Create dataset (using BC-optimized LMDB for faster data loading)
+    dataset = BCDatasetLMDB(cfg.dataset)
 
     # Create dataloader with optional distributed sampler
     sampler = DistributedSampler(dataset, shuffle=True) if is_distributed else None
@@ -82,6 +82,8 @@ def main(cfg: DictConfig):
         sampler=sampler,
         num_workers=cfg.num_workers,
         pin_memory=True,
+        prefetch_factor=4,
+        persistent_workers=True if cfg.num_workers > 0 else False,
     )
 
     # Set seeds (add local_rank offset for distributed)
@@ -106,11 +108,13 @@ def main(cfg: DictConfig):
 
     # Create trainer and setup device/distributed
     bc = BehaviorCloneTrainer(cfg.learning_rate, policy)
+    print("Created BC Trainer")
     if is_distributed:
         bc.setup_multi_gpu(local_rank)
+        print(f"[Rank {local_rank}] BC Trainer distributed setup complete.")
     else:
         bc.to_device(device=device)
-
+    print("BC Trainer setup complete.")
     # Load checkpoint if specified
     if cfg.load_ckpt_path != "":
         bc.load_checkpoint(cfg.load_ckpt_path)

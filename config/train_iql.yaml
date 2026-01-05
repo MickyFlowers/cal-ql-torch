@@ -3,7 +3,7 @@ defaults:
   - logging: logging_defaults
   - dataset: dataset_defaults
 
-observation_dim: 12
+observation_dim: 6
 action_dim: 6
 
 seed: 42

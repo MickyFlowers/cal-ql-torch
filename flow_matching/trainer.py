@@ -1,7 +1,7 @@
 """
-Diffusion Policy Trainer
+Flow Matching Policy Trainer
 
-Trainer for diffusion-based action prediction with EMA model averaging.
+Trainer for flow matching-based action prediction with EMA model averaging.
 """
 
 import copy
@@ -31,9 +31,9 @@ def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_st
     return LambdaLR(optimizer, lr_lambda)
 
 
-class DiffusionPolicyTrainer:
+class FlowMatchingPolicyTrainer:
     """
-    Trainer for Diffusion Policy.
+    Trainer for Flow Matching Policy.
 
     Features:
     - Mixed precision training with GradScaler
@@ -115,7 +115,7 @@ class DiffusionPolicyTrainer:
             self.lr_scheduler.step()
 
         # Add learning rate to metrics
-        metrics['dp/lr'] = self.optimizer.param_groups[0]['lr']
+        metrics['fm/lr'] = self.optimizer.param_groups[0]['lr']
 
         return metrics
 
@@ -157,7 +157,7 @@ class DiffusionPolicyTrainer:
                 loss=loss,
                 ema_decay=self.policy_ema.decay,
             ),
-            "dp"
+            "fm"  # Changed from "dp" to "fm" for flow matching
         )
         return metrics
 
@@ -171,13 +171,13 @@ class DiffusionPolicyTrainer:
             num_batches: optional limit on number of batches
 
         Returns:
-            metrics: dict of evaluation metrics
+            metrics: dict of evaluation metrics (using L1 loss like ACT)
         """
         self.policy_ema_model.eval()
         self.vision_encoder_ema_model.eval()
 
-        total_action_error = 0
-        num_samples = 0
+        total_sample_error = 0
+        num_batches_processed = 0
 
         for i, batch in enumerate(dataloader):
             if num_batches is not None and i >= num_batches:
@@ -190,13 +190,18 @@ class DiffusionPolicyTrainer:
             # Use EMA models for evaluation
             image_embeds = self.vision_encoder_ema_model(images)[1]
             sample_action = self.policy_ema_model.predict_action(image_embeds, observations)
-            action_error = torch.nn.functional.mse_loss(sample_action, actions, reduction='sum')
 
-            total_action_error += action_error.item()
-            num_samples += observations.shape[0]
+            # Use L1 loss (same as ACT) with mean reduction
+            sample_error = torch.nn.functional.l1_loss(sample_action, actions)
+
+            total_sample_error += sample_error.item()
+            num_batches_processed += 1
+
+        # Average over batches (each batch already uses mean reduction)
+        avg_sample_error = total_sample_error / num_batches_processed
 
         metrics = {
-            'eval/action_error': total_action_error / num_samples,
+            'eval/sample_error': avg_sample_error,
         }
         return metrics
 
@@ -241,7 +246,7 @@ class DiffusionPolicyTrainer:
             eps=self.config.adam_epsilon
         )
 
-        print(f"[Rank {dist.get_rank()}] DiffusionPolicy Trainer multi-GPU setup complete. Device: {device}")
+        print(f"[Rank {dist.get_rank()}] FlowMatching Trainer multi-GPU setup complete. Device: {device}")
 
     @property
     def total_steps(self):
@@ -279,5 +284,5 @@ class DiffusionPolicyTrainer:
         print(f"Loaded checkpoint from {filepath} at step {self._total_steps}")
 
 
-# Backward compatibility alias
-Trainer = DiffusionPolicyTrainer
+# Alias for convenience
+Trainer = FlowMatchingPolicyTrainer

@@ -11,7 +11,7 @@ ckpt_path: ./checkpoints/bc_policy.pth
 statistics_path: ./dataset/statistics.yaml
 
 # Model architecture (must match training config)
-observation_dim: 12
+observation_dim: 6
 action_dim: 6
 hidden_dim: 256
 policy_obs_proj_arch: '256-256-256-256'

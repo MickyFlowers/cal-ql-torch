@@ -20,7 +20,7 @@ image_resize: 256
 image_size: 224
 ckpt_download_interval: 5
 
-observation_dim: 12
+observation_dim: 6
 action_dim: 6
 hidden_dim: 256
 policy_obs_proj_arch: '256-256'
