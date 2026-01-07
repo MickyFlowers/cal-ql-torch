@@ -19,6 +19,7 @@ num_encoder_layers: 4
 num_decoder_layers: 4
 num_heads: 8
 chunk_size: 30
+rollout_size: 5
 dim_feedforward: 2048
 backbone_name: resnet18
 

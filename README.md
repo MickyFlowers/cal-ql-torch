@@ -238,10 +238,12 @@ Each training script uses a different default port to avoid conflicts:
 roslaunch realsense2_camera rs_camera.launch enable_depth:=false color_height:=480 color_width:=640 color_fps:=30
 ```
 
-### Start FT sensor node:
+### Start FT sensor node and space mouse:
 
 ```bash
+sudo chmod 777 /dev/ttyUSB0
 python3 -m env.ft_sensor_node
+python3 -m env.spacemouse_node
 ```
 
 ## Configuration
