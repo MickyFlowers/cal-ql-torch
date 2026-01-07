@@ -39,7 +39,7 @@ def process(args):
             observations.create_dataset('img_obs', data=img_obs[:-1])
             f.create_dataset('rewards', data=rewards)
             f.create_dataset('dones', data=dones)
-            f.create_dataset('actions', data=action[1:])
+            f.create_dataset('actions', data=action[:-1])
             next_observations.create_dataset('ft_obs', data=ft_obs[1:])
             next_observations.create_dataset('tcp_obs', data=tcp_obs[1:])
             next_observations.create_dataset('jnt_obs', data=jnt_obs[1:])

@@ -402,6 +402,134 @@ class ResNetQFunction(nn.Module):
         return q_value.view(obs_shape, num_repeat, 1)
 
 
+class ResNetDoubleQFunction(nn.Module):
+    """
+    Double Q-Function (Q1, Q2) with shared backbone and two separate heads.
+    This is more efficient than having two separate ResNetQFunction instances
+    as it only runs the ResNet backbone once per forward pass.
+    """
+
+    def __init__(
+        self,
+        observation_dim,
+        action_dim,
+        obs_proj_arch="256-256",
+        out_proj_arch="256-256",
+        hidden_dim=256,
+        orthogonal_init=False,
+        resnet_model='resnet18',
+        image_size=(224, 224),
+        train_backbone=False,
+        out_indices=3,
+    ):
+        super().__init__()
+        self.observation_dim = observation_dim
+        self.action_dim = action_dim
+        self.backbone = timm.create_model(resnet_model, pretrained=True, features_only=True, out_indices=(out_indices,))
+        for module in self.backbone.modules():
+            if isinstance(module, torch.nn.ReLU):
+                module.inplace = False
+        if not train_backbone:
+            for param in self.backbone.parameters():
+                param.requires_grad = False
+        else:
+            for param in self.backbone.parameters():
+                param.requires_grad = True
+
+        # Get the number of output channels from the backbone
+        with torch.no_grad():
+            dummy_input = torch.randn(1, 3, *image_size)
+            dummy_output = self.backbone(dummy_input)
+            backbone_out_channels = dummy_output[0].shape[1]
+
+        # Shared image feature projection
+        self.image_feature_proj = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(backbone_out_channels, hidden_dim)
+        )
+
+        # Shared obs+action projection
+        self.obs_proj = FullyConnectedNetwork(
+            input_dim=observation_dim + action_dim, output_dim=hidden_dim, arch=obs_proj_arch, orthogonal_init=orthogonal_init
+        )
+
+        # Two separate output heads for Q1 and Q2
+        self.out_proj_q1 = FullyConnectedNetwork(
+            input_dim=2 * hidden_dim, output_dim=1, arch=out_proj_arch, orthogonal_init=orthogonal_init
+        )
+        self.out_proj_q2 = FullyConnectedNetwork(
+            input_dim=2 * hidden_dim, output_dim=1, arch=out_proj_arch, orthogonal_init=orthogonal_init
+        )
+
+    def _encode_image(self, images):
+        image_ft_map = self.backbone(images)[0]
+        return self.image_feature_proj(image_ft_map)
+
+    def forward(self, observations, images, actions):
+        """
+        Forward pass returning both Q1 and Q2 values.
+
+        Args:
+            observations: [batch, obs_dim]
+            images: [batch, 3, H, W]
+            actions: [batch, action_dim]
+
+        Returns:
+            q1: [batch, 1]
+            q2: [batch, 1]
+        """
+        # Shared backbone (runs only once)
+        image_ft_map = self.backbone(images)[0]
+        image_ft = self.image_feature_proj(image_ft_map)
+
+        # Shared obs+action encoding
+        obs_ft = self.obs_proj(torch.cat([observations, actions], dim=-1))
+        ft = torch.cat([obs_ft, image_ft], dim=-1)
+
+        # Two separate heads
+        q1 = self.out_proj_q1(ft)
+        q2 = self.out_proj_q2(ft)
+        return q1, q2
+
+    def q1(self, observations, images, actions):
+        """Get only Q1 value (useful for policy update in some algorithms)."""
+        image_ft_map = self.backbone(images)[0]
+        image_ft = self.image_feature_proj(image_ft_map)
+        obs_ft = self.obs_proj(torch.cat([observations, actions], dim=-1))
+        ft = torch.cat([obs_ft, image_ft], dim=-1)
+        return self.out_proj_q1(ft)
+
+    def evaluate_actions(self, observations, images, actions):
+        """
+        Efficiently evaluates Q1 and Q2 for many actions sharing the same obs/image.
+
+        Args:
+            observations: [batch, obs_dim]
+            images: [batch, 3, H, W]
+            actions: [batch * num_actions, action_dim]
+
+        Returns:
+            q1: [batch, num_actions, 1]
+            q2: [batch, num_actions, 1]
+        """
+        action_shape = actions.shape[0]
+        obs_shape = observations.shape[0]
+        num_repeat = int(action_shape / obs_shape)
+
+        image_ft = self._encode_image(images)
+        image_ft = image_ft.repeat_interleave(num_repeat, dim=0)
+
+        obs_rep = observations.repeat_interleave(num_repeat, dim=0)
+        obs_actions = torch.cat([obs_rep, actions], dim=-1)
+        obs_ft = self.obs_proj(obs_actions)
+        ft = torch.cat([obs_ft, image_ft], dim=-1)
+
+        q1 = self.out_proj_q1(ft).view(obs_shape, num_repeat, 1)
+        q2 = self.out_proj_q2(ft).view(obs_shape, num_repeat, 1)
+        return q1, q2
+
+
 class ResNetVFunction(nn.Module):
     """
     Value Function V(s) using ResNet backbone for image encoding.

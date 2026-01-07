@@ -13,7 +13,6 @@ Usage:
     Multi GPU:   torchrun --nproc_per_node=N -m iql.train [args]
 """
 
-import copy
 import os
 import time
 
@@ -27,7 +26,7 @@ from tqdm import tqdm
 
 from data.dataset import CalqlDataset
 from iql.iql_trainer import IQLTrainer
-from model.model import ResNetPolicy, ResNetQFunction, ResNetVFunction
+from model.model import ResNetPolicy, ResNetDoubleQFunction, ResNetVFunction
 from utils.distributed import (
     barrier,
     cleanup_distributed,
@@ -77,19 +76,42 @@ def main(cfg: DictConfig):
             include_exp_prefix_sub_dir=False,
         )
 
-    # Create dataset
-    dataset = CalqlDataset(cfg.dataset)
+    # Create dataset with optional preloading to memory
+    # Preloading eliminates I/O latency at epoch boundaries (especially useful for DDP)
+    preload_to_memory = getattr(cfg, 'preload_to_memory', True)
+    if is_main_process():
+        print(f"Preload to memory: {preload_to_memory}")
+
+    dataset = CalqlDataset(cfg.dataset, preload_to_memory=preload_to_memory)
+
+    # Worker init function to reset HDF5 file handles after fork (only needed when not preloading)
+    def worker_init_fn(worker_id):
+        # Clear any inherited file handles from parent process
+        # Each worker will open its own handles on first access
+        dataset._file_handles = {}
 
     # Create dataloader with optional distributed sampler
     sampler = DistributedSampler(dataset, shuffle=True) if is_distributed else None
+
+    # When preloading to memory, we can reduce num_workers since there's no I/O
+    # But keep some workers for CPU-bound image transforms
+    num_workers = cfg.num_workers
+    # if preload_to_memory and num_workers > 8:
+    #     num_workers = 8  # Sufficient for image transforms
+    #     if is_main_process():
+    #         print(f"Reduced num_workers to {num_workers} (data preloaded to memory)")
+
     dataloader = DataLoader(
         dataset,
         batch_size=cfg.batch_size,
         shuffle=(sampler is None),
         sampler=sampler,
-        num_workers=cfg.num_workers,
+        num_workers=num_workers,
         pin_memory=True,
-        prefetch_factor=2,
+        prefetch_factor=4 if num_workers > 0 else None,
+        persistent_workers=True if num_workers > 0 else False,
+        drop_last=True,
+        worker_init_fn=worker_init_fn if not preload_to_memory else None,
     )
 
     # Set seeds (add local_rank offset for distributed)
@@ -112,9 +134,8 @@ def main(cfg: DictConfig):
         train_backbone=cfg.train_policy_backbone,
     )
 
-    # Create Q-function networks
-    qf = {}
-    qf['qf1'] = ResNetQFunction(
+    # Create Double Q-function network (shared backbone, two heads)
+    qf = ResNetDoubleQFunction(
         observation_dim,
         action_dim,
         cfg.q_obs_proj_arch,
@@ -123,17 +144,6 @@ def main(cfg: DictConfig):
         cfg.orthogonal_init,
         train_backbone=cfg.train_q_backbone
     )
-    qf['qf2'] = ResNetQFunction(
-        observation_dim,
-        action_dim,
-        cfg.q_obs_proj_arch,
-        cfg.q_out_proj_arch,
-        cfg.hidden_dim,
-        cfg.orthogonal_init,
-        train_backbone=cfg.train_q_backbone
-    )
-    qf['target_qf1'] = copy.deepcopy(qf['qf1'])
-    qf['target_qf2'] = copy.deepcopy(qf['qf2'])
 
     # Create V-function network (unique to IQL)
     vf = ResNetVFunction(
@@ -173,11 +183,16 @@ def main(cfg: DictConfig):
     epoch = 0
     train_metrics = None
 
-    # Create checkpoint directory (only on main process)
+    # Create checkpoint directory and save config (only on main process)
     ckpt_path = None
     if cfg.save_every_n_epoch > 0 and is_main_process():
         ckpt_path = os.path.join(cfg.ckpt_path, f'{cfg.logging.prefix}_{time.strftime("%Y%m%d_%H%M%S")}')
         os.makedirs(ckpt_path, exist_ok=True)
+        # Save config to checkpoint directory
+        config_save_path = os.path.join(ckpt_path, "config.yaml")
+        with open(config_save_path, 'w') as f:
+            f.write(OmegaConf.to_yaml(cfg))
+        print(f"Saved config to {config_save_path}")
 
     while True:
         metrics = {"epoch": epoch}

@@ -71,20 +71,51 @@ def main(cfg: DictConfig):
         )
 
     # Create dataset (using BC-optimized LMDB for faster data loading)
-    dataset = BCDatasetLMDB(cfg.dataset)
+    # sample_ratio and sample_seed ensure consistent random sampling across all GPUs
+    train_dataset = BCDatasetLMDB(
+        cfg.dataset,
+        sample_ratio=cfg.get('sample_ratio', 1.0),
+        sample_seed=cfg.get('sample_seed', 42)
+    )
+
+    # Create validation dataset from remaining episodes (if sample_ratio < 1)
+    val_dataset = train_dataset.get_validation_dataset()
+
+    # Log dataset info on main process
+    if is_main_process():
+        print(f"Train dataset size: {len(train_dataset)} samples")
+        if cfg.get('sample_ratio', 1.0) < 1.0:
+            print(f"Using {cfg.sample_ratio*100:.1f}% of data with seed {cfg.get('sample_seed', 42)}")
+        if val_dataset is not None:
+            print(f"Validation dataset size: {len(val_dataset)} samples")
 
     # Create dataloader with optional distributed sampler
-    sampler = DistributedSampler(dataset, shuffle=True) if is_distributed else None
-    dataloader = DataLoader(
-        dataset,
+    train_sampler = DistributedSampler(train_dataset, shuffle=True) if is_distributed else None
+    train_dataloader = DataLoader(
+        train_dataset,
         batch_size=cfg.batch_size,
-        shuffle=(sampler is None),
-        sampler=sampler,
+        shuffle=(train_sampler is None),
+        sampler=train_sampler,
         num_workers=cfg.num_workers,
         pin_memory=True,
         prefetch_factor=4,
         persistent_workers=True if cfg.num_workers > 0 else False,
     )
+
+    # Create validation dataloader if validation dataset exists
+    val_dataloader = None
+    if val_dataset is not None:
+        val_sampler = DistributedSampler(val_dataset, shuffle=False) if is_distributed else None
+        val_dataloader = DataLoader(
+            val_dataset,
+            batch_size=cfg.batch_size,
+            shuffle=False,
+            sampler=val_sampler,
+            num_workers=cfg.num_workers,
+            pin_memory=True,
+            prefetch_factor=4,
+            persistent_workers=True if cfg.num_workers > 0 else False,
+        )
 
     # Set seeds (add local_rank offset for distributed)
     np.random.seed(cfg.seed + local_rank)
@@ -124,13 +155,17 @@ def main(cfg: DictConfig):
     train_timer = None
     epoch = 0
     train_metrics = None
-    expl_metrics = None
 
-    # Create checkpoint directory (only on main process)
+    # Create checkpoint directory and save config (only on main process)
     ckpt_path = None
     if cfg.save_every_n_epoch > 0 and is_main_process():
         ckpt_path = os.path.join(cfg.ckpt_path, f'{cfg.logging.prefix}_{time.strftime("%Y%m%d_%H%M%S")}')
         os.makedirs(ckpt_path, exist_ok=True)
+        # Save config to checkpoint directory
+        config_save_path = os.path.join(ckpt_path, "config.yaml")
+        with open(config_save_path, 'w') as f:
+            f.write(OmegaConf.to_yaml(cfg))
+        print(f"Saved config to {config_save_path}")
 
     while True:
         metrics = {"epoch": epoch}
@@ -139,8 +174,6 @@ def main(cfg: DictConfig):
         metrics["train_time"] = 0 if train_timer is None else train_timer()
         if train_metrics is not None:
             metrics.update(train_metrics)
-        if expl_metrics is not None:
-            metrics.update(expl_metrics)
 
         # Log only on main process
         if is_main_process():
@@ -162,13 +195,13 @@ def main(cfg: DictConfig):
 
         with Timer() as train_timer:
             # Set epoch for distributed sampler
-            if sampler is not None:
-                sampler.set_epoch(epoch)
+            if train_sampler is not None:
+                train_sampler.set_epoch(epoch)
 
             # Accumulate metrics over the entire epoch
             epoch_metrics = {}
             num_batches = 0
-            for batch in tqdm(dataloader, desc="Training", disable=not is_main_process()):
+            for batch in tqdm(train_dataloader, desc="Training", disable=not is_main_process()):
                 batch = dict_to_device(batch, device=device)
                 batch_metrics = bc.train(batch)
                 # Accumulate metrics
@@ -187,7 +220,29 @@ def main(cfg: DictConfig):
             if is_distributed:
                 train_metrics = sync_metrics(train_metrics)
 
-            total_grad_steps += len(dataloader)
+            total_grad_steps += len(train_dataloader)
+
+        # Validation loop
+        eval_every = cfg.get('eval_every_n_epochs', 10)
+        if val_dataloader is not None and epoch % eval_every == 0 and epoch != 0:
+            bc.policy.eval()
+            val_epoch_metrics = {}
+            val_num_batches = 0
+            for batch in tqdm(val_dataloader, desc="Validation", disable=not is_main_process()):
+                batch = dict_to_device(batch, device=device)
+                batch_metrics = bc.evaluate(batch)
+                for k, v in batch_metrics.items():
+                    if isinstance(v, torch.Tensor):
+                        v = v.detach().item()
+                    val_epoch_metrics[k] = val_epoch_metrics.get(k, 0.0) + v
+                val_num_batches += 1
+
+            val_metrics = {k: v / val_num_batches for k, v in val_epoch_metrics.items()}
+            if is_distributed:
+                val_metrics = sync_metrics(val_metrics)
+            if is_main_process() and wandb_logger is not None:
+                wandb_logger.log(val_metrics)
+            bc.policy.train()
 
         # Synchronize before next epoch (if distributed)
         barrier()

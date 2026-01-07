@@ -125,7 +125,7 @@ def main(cfg: DictConfig):
     if cfg.load_ckpt_path and cfg.load_ckpt_path != "":
         trainer.load_checkpoint(cfg.load_ckpt_path)
 
-    # Create checkpoint directory (only on main process)
+    # Create checkpoint directory and save config (only on main process)
     ckpt_dir = None
     if is_main_process():
         ckpt_dir = os.path.join(
@@ -133,6 +133,11 @@ def main(cfg: DictConfig):
             f'{cfg.logging.prefix}_{time.strftime("%Y%m%d_%H%M%S")}'
         )
         os.makedirs(ckpt_dir, exist_ok=True)
+        # Save config to checkpoint directory
+        config_save_path = os.path.join(ckpt_dir, "config.yaml")
+        with open(config_save_path, 'w') as f:
+            f.write(OmegaConf.to_yaml(cfg))
+        print(f"Saved config to {config_save_path}")
 
     # Training loop
     if is_main_process():

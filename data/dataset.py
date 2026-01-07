@@ -76,9 +76,19 @@ def calc_statics(data_root, episode_files):
         yaml.safe_dump(statistics, f, default_flow_style=False, allow_unicode=True)
 
 class CalqlDataset(Dataset):
-    def __init__(self, config: DictConfig):
+    def __init__(self, config: DictConfig, preload_to_memory: bool = False):
+        """
+        CalqlDataset for offline RL training.
+
+        Args:
+            config: Dataset configuration
+            preload_to_memory: If True, preload all data into memory during initialization.
+                              This eliminates I/O latency at epoch boundaries but requires
+                              sufficient RAM (dataset size ~33GB for typical datasets).
+        """
         super().__init__()
         self.config = config
+        self.preload_to_memory = preload_to_memory
         # parser all episode files
 
         root_path = config.root_path
@@ -94,6 +104,12 @@ class CalqlDataset(Dataset):
             calc_meta(self.root_path, self.episode_files)
         self.statistics = self._parser_statstics(self.statics_file)
         self.meta = self._parser_meta(self.meta_file)
+
+        # Pre-compute cumulative sum for faster indexing
+        self._cum_sum = np.cumsum(self.meta['episode_length'])
+
+        # File handle cache (will be initialized per worker)
+        self._file_handles = {}
         self.image_transform = transforms.Compose([
             transforms.Resize((config.image_resize, config.image_resize)),
             transforms.RandomCrop(config.image_size),
@@ -107,12 +123,86 @@ class CalqlDataset(Dataset):
             transforms.Lambda(
                 lambda x: x + 0.01 * torch.randn_like(x)
             ),
-            transforms.Normalize(                     
+            transforms.Normalize(
                 mean=[0.485, 0.456, 0.406],
                 std=[0.229, 0.224, 0.225]
             ),
         ])
-    
+
+        # Preload data if requested
+        self._preloaded_data = None
+        self._preloaded_episodes = None
+        if self.preload_to_memory:
+            self._preload_all_data()
+
+    def _load_single_episode(self, args):
+        """Load a single episode from HDF5 file (for parallel loading)."""
+        ep_idx, episode_file, reward_scale, reward_bias, discount = args
+        with h5py.File(episode_file, 'r') as f:
+            observations = f['observations']
+            ft_obs = observations['ft_obs'][:]
+            images = observations['img_obs'][:]
+            actions = f['actions'][:]
+            next_observations = f['next_observations']
+            next_ft_obs = next_observations['ft_obs'][:]
+            next_images = next_observations['img_obs'][:]
+            rewards = f['rewards'][:]
+            rewards = rewards * reward_scale + reward_bias
+            dones = f['dones'][:]
+
+            # Determine if episode is successful
+            success = 1.0 if rewards[-1] == 1.0 else 0.0
+
+            # Precompute MC returns for entire episode
+            episode_length = ft_obs.shape[0]
+            mc_returns = np.zeros(episode_length, dtype=np.float32)
+            mc_return = 0.0
+            for t in reversed(range(episode_length)):
+                mc_return = rewards[t] + discount * mc_return * (1.0 - dones[t])
+                mc_returns[t] = mc_return
+
+            return ep_idx, {
+                'ft_obs': ft_obs,
+                'images': images,
+                'actions': actions,
+                'next_ft_obs': next_ft_obs,
+                'next_images': next_images,
+                'rewards': rewards,
+                'dones': dones,
+                'mc_returns': mc_returns,
+                'success': success,
+            }
+
+    def _preload_all_data(self):
+        """Preload all episode data into memory using parallel I/O."""
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        import multiprocessing
+
+        print("[CalqlDataset] Preloading all data into memory (parallel)...")
+        total_samples = int(np.sum(self.meta['episode_length']))
+
+        # Prepare arguments for parallel loading
+        args_list = [
+            (ep_idx, episode_file, self.config.reward_scale, self.config.reward_bias, self.config.discount)
+            for ep_idx, episode_file in enumerate(self.episode_files)
+        ]
+
+        # Use ThreadPoolExecutor for I/O-bound parallel loading
+        # Threads work well here because HDF5 releases GIL during I/O
+        num_workers = min(32, multiprocessing.cpu_count(), len(self.episode_files))
+        self._preloaded_episodes = [None] * len(self.episode_files)
+
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
+            futures = {executor.submit(self._load_single_episode, args): args[0] for args in args_list}
+            with tqdm(total=len(self.episode_files), desc="Preloading episodes") as pbar:
+                for future in as_completed(futures):
+                    ep_idx, episode_data = future.result()
+                    self._preloaded_episodes[ep_idx] = episode_data
+                    pbar.update(1)
+
+        print(f"[CalqlDataset] Preloaded {len(self._preloaded_episodes)} episodes, {total_samples} samples")
+        self._preloaded_data = True
+
     def reload(self):
         self.episode_files = glob.glob(os.path.join(self.root_path, "*.hdf5"))
         calc_statics(self.root_path, self.episode_files)
@@ -124,12 +214,12 @@ class CalqlDataset(Dataset):
         with open(meta_file, 'r') as f:
             meta = yaml.safe_load(f)
         return meta
-    
+
     def _parser_statstics(self, statics_file: str):
         with open(statics_file, 'r') as f:
             statistics = yaml.safe_load(f)
-        return statistics   
-    
+        return statistics
+
     def __len__(self):
         return np.sum(self.meta['episode_length'])
 
@@ -145,12 +235,33 @@ class CalqlDataset(Dataset):
             data = (data - data_mean) / data_std
         return data 
     
+    def _get_file_handle(self, episode_idx):
+        """Get cached file handle or open new one."""
+        if episode_idx not in self._file_handles:
+            episode_file = self.episode_files[episode_idx]
+            self._file_handles[episode_idx] = h5py.File(episode_file, 'r', swmr=True)
+        return self._file_handles[episode_idx]
+
     def __getitem__(self, index):
-        cum_sum = np.cumsum(self.meta['episode_length'])
-        episode_idx = np.searchsorted(cum_sum, index, side='right')
-        sample_idx = index - (cum_sum[episode_idx - 1] if episode_idx > 0 else 0)
-        episode_file = self.episode_files[episode_idx]
-        with h5py.File(episode_file, 'r') as f:
+        episode_idx = np.searchsorted(self._cum_sum, index, side='right')
+        sample_idx = index - (self._cum_sum[episode_idx - 1] if episode_idx > 0 else 0)
+
+        # Use preloaded data if available
+        if self._preloaded_data and self._preloaded_episodes is not None:
+            ep_data = self._preloaded_episodes[episode_idx]
+            proprio = ep_data['ft_obs'][sample_idx]
+            next_proprio = ep_data['next_ft_obs'][sample_idx]
+            image = ep_data['images'][sample_idx]
+            next_image = ep_data['next_images'][sample_idx]
+            action = ep_data['actions'][sample_idx]
+            reward = ep_data['rewards'][sample_idx]
+            done = ep_data['dones'][sample_idx]
+            mc_return = ep_data['mc_returns'][sample_idx]
+            success = ep_data['success']
+        else:
+            # Fall back to HDF5 file access
+            f = self._get_file_handle(episode_idx)
+
             observations = f['observations']
             ft_obs = observations['ft_obs']
             images = observations['img_obs']
@@ -173,22 +284,25 @@ class CalqlDataset(Dataset):
             next_proprio = next_ft_obs[sample_idx]
             image = images[sample_idx]
             next_image = next_images[sample_idx]
-            image: Image.Image = np_buffer_to_pil_image(image)
-            image = self.image_transform(image)
-            next_image: Image.Image = np_buffer_to_pil_image(next_image)
-            next_image = self.image_transform(next_image)
             action = actions[sample_idx]
-            proprio = self._normalize(proprio, self.statistics['proprio'], self.config.norm_type)
-            next_proprio = self._normalize(next_proprio, self.statistics['proprio'], self.config.norm_type)
-            action = self._normalize(action, self.statistics['action'], self.config.norm_type)
             reward = rewards[sample_idx]
             done = dones[sample_idx]
             # calc_mc_returns
             mc_return = 0.0
             for t in reversed(range(sample_idx, episode_length)):
                 mc_return = rewards[t] + self.config.discount * mc_return * (1.0 - dones[t])
-            
-            
+
+        # Transform images
+        image: Image.Image = np_buffer_to_pil_image(image)
+        image = self.image_transform(image)
+        next_image: Image.Image = np_buffer_to_pil_image(next_image)
+        next_image = self.image_transform(next_image)
+
+        # Normalize
+        proprio = self._normalize(proprio, self.statistics['proprio'], self.config.norm_type)
+        next_proprio = self._normalize(next_proprio, self.statistics['proprio'], self.config.norm_type)
+        action = self._normalize(action, self.statistics['action'], self.config.norm_type)
+
         observations = {
             'proprio': proprio.astype(np.float32),
             'image': image,
@@ -207,7 +321,15 @@ class CalqlDataset(Dataset):
             'success': np.array(success).astype(np.float32),
         }
         return sample
-    
+
+    def __del__(self):
+        """Close all cached file handles."""
+        for fh in self._file_handles.values():
+            try:
+                fh.close()
+            except:
+                pass
+
 class FlowMatchingDataset(Dataset):
     """Dataset for Flow Matching Policy training with action chunks."""
     def __init__(self, config: DictConfig):
@@ -718,22 +840,64 @@ class BCDatasetLMDB(Dataset):
     2. No reward/done/mc_return/success fields
     3. Smaller LMDB records = faster I/O
     4. Single image transform = half the CPU overhead
+
+    Supports random sampling with a fixed ratio for studying data efficiency.
+    Uses a fixed seed to ensure consistent sampling across multi-GPU training.
+
+    When sample_ratio < 1.0, the remaining episodes can be used as validation data
+    by calling get_validation_dataset() after creating the training dataset.
     """
 
-    def __init__(self, config: DictConfig):
+    def __init__(self, config: DictConfig, sample_ratio: float = 1.0, sample_seed: int = 42,
+                 is_validation: bool = False, validation_indices: np.ndarray = None):
+        """
+        Args:
+            config: Dataset configuration
+            sample_ratio: Ratio of samples to use (0.0, 1.0]. Default 1.0 uses all data.
+            sample_seed: Fixed random seed for sampling to ensure consistency across GPUs.
+            is_validation: If True, this is a validation dataset (uses validation_indices).
+            validation_indices: Pre-computed indices for validation dataset.
+        """
         super().__init__()
         self.config = config
         self.root_path = config.root_path
+        self.sample_ratio = sample_ratio
+        self.sample_seed = sample_seed
+        self.is_validation = is_validation
+        self._validation_indices = validation_indices  # For creating validation dataset
         self.lmdb_path = os.path.join(self.root_path, "lmdb_cache_bc")
 
-        # Check if LMDB cache exists
-        if not os.path.exists(self.lmdb_path):
-            episode_files = sorted(glob.glob(os.path.join(self.root_path, "*.hdf5")))
-            if not episode_files:
-                raise ValueError(f"No HDF5 files found in {self.root_path}")
+        # Use a lock file to prevent race condition in multi-GPU training
+        # Only rank 0 should create the LMDB cache, others wait for completion
+        lock_file = os.path.join(self.root_path, ".lmdb_cache_bc.lock")
+        done_file = os.path.join(self.root_path, ".lmdb_cache_bc.done")
 
-            calc_statics(self.root_path, episode_files)
-            self.total_samples, self.episode_lengths = self._convert_to_lmdb(episode_files)
+        # Check if we're in distributed mode
+        local_rank = int(os.environ.get("LOCAL_RANK", 0))
+        is_main = local_rank == 0
+
+        # Check if LMDB cache exists and is complete
+        if not os.path.exists(done_file):
+            if is_main:
+                # Main process creates the cache
+                if not os.path.exists(self.lmdb_path):
+                    episode_files = sorted(glob.glob(os.path.join(self.root_path, "*.hdf5")))
+                    if not episode_files:
+                        raise ValueError(f"No HDF5 files found in {self.root_path}")
+
+                    calc_statics(self.root_path, episode_files)
+                    self.total_samples, self.episode_lengths = self._convert_to_lmdb(episode_files)
+                # Create done file to signal completion
+                with open(done_file, 'w') as f:
+                    f.write('done')
+                print(f"[Rank {local_rank}] LMDB cache created: {self.lmdb_path}")
+            else:
+                # Other processes wait for done file
+                print(f"[Rank {local_rank}] Waiting for LMDB cache to be created by rank 0...")
+                import time
+                while not os.path.exists(done_file):
+                    time.sleep(0.5)
+                print(f"[Rank {local_rank}] LMDB cache ready, continuing...")
         else:
             print(f"Loading from existing LMDB cache: {self.lmdb_path}")
 
@@ -752,24 +916,89 @@ class BCDatasetLMDB(Dataset):
             self.episode_lengths = meta['episode_lengths']
         tmp_env.close()
 
-        self.image_transform = transforms.Compose([
-            transforms.Resize((config.image_resize, config.image_resize)),
-            transforms.RandomCrop(config.image_size),
-            transforms.ColorJitter(
-                brightness=0.2,
-                contrast=0.2,
-                saturation=0.2,
-                hue=0.05
-            ),
-            transforms.ToTensor(),
-            transforms.Lambda(
-                lambda x: x + 0.01 * torch.randn_like(x)
-            ),
-            transforms.Normalize(
-                mean=[0.485, 0.456, 0.406],
-                std=[0.229, 0.224, 0.225]
-            ),
-        ])
+        # Random sampling with fixed seed for multi-GPU consistency
+        self._setup_sample_indices()
+
+        if self.is_validation:
+            self.image_transform = transforms.Compose([
+                transforms.Resize((config.image_resize, config.image_resize)),
+                transforms.CenterCrop(config.image_size),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ])
+        else:
+            self.image_transform = transforms.Compose([
+                transforms.Resize((config.image_resize, config.image_resize)),
+                transforms.RandomCrop(config.image_size),
+                transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.05),
+                transforms.ToTensor(),
+                transforms.Lambda(lambda x: x + 0.01 * torch.randn_like(x)),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ])
+
+    def _setup_sample_indices(self):
+        """Setup random sampling indices at episode level with fixed seed for multi-GPU consistency.
+
+        This samples complete episodes/trajectories rather than individual steps,
+        which is more meaningful for behavior cloning from demonstrations.
+
+        When sample_ratio < 1.0, also stores validation indices for remaining episodes.
+        """
+        # If this is a validation dataset, use the provided validation indices
+        if self.is_validation and self._validation_indices is not None:
+            self.sample_indices = self._validation_indices
+            self.num_samples = len(self.sample_indices)
+            self.validation_sample_indices = None  # No further validation split
+            return
+
+        if self.sample_ratio >= 1.0:
+            # Use all samples
+            self.sample_indices = None
+            self.num_samples = self.total_samples
+            self.validation_sample_indices = None  # No validation data when using all data
+        else:
+            # Use fixed seed to ensure all GPU processes get the same indices
+            rng = np.random.RandomState(self.sample_seed)
+
+            # Sample at episode level, not step level
+            num_episodes = len(self.episode_lengths)
+            num_episodes_to_sample = max(1, int(num_episodes * self.sample_ratio))
+
+            # Randomly select episodes
+            episode_indices = np.arange(num_episodes)
+            rng.shuffle(episode_indices)
+            selected_episodes = np.sort(episode_indices[:num_episodes_to_sample])
+            validation_episodes = np.sort(episode_indices[num_episodes_to_sample:])
+
+            # Compute cumulative lengths to find step ranges for each episode
+            cum_lengths = np.cumsum([0] + self.episode_lengths)
+
+            # Collect all step indices from selected episodes (training)
+            sample_indices = []
+            for ep_idx in selected_episodes:
+                start_idx = cum_lengths[ep_idx]
+                end_idx = cum_lengths[ep_idx + 1]
+                sample_indices.extend(range(start_idx, end_idx))
+
+            self.sample_indices = np.array(sample_indices)
+            self.num_samples = len(self.sample_indices)
+
+            # Collect all step indices from remaining episodes (validation)
+            validation_indices = []
+            for ep_idx in validation_episodes:
+                start_idx = cum_lengths[ep_idx]
+                end_idx = cum_lengths[ep_idx + 1]
+                validation_indices.extend(range(start_idx, end_idx))
+
+            self.validation_sample_indices = np.array(validation_indices) if validation_indices else None
+
+            # Calculate actual steps from selected episodes
+            num_val_episodes = len(validation_episodes)
+            num_val_steps = len(validation_indices) if validation_indices else 0
+            print(f"[BCDatasetLMDB] Train: {num_episodes_to_sample}/{num_episodes} episodes "
+                  f"({self.sample_ratio*100:.1f}%) -> {self.num_samples} steps")
+            print(f"[BCDatasetLMDB] Val: {num_val_episodes}/{num_episodes} episodes "
+                  f"({(1-self.sample_ratio)*100:.1f}%) -> {num_val_steps} steps")
 
     def _convert_to_lmdb(self, episode_files):
         """Convert HDF5 files to LMDB format (BC-optimized: single frame only)."""
@@ -833,7 +1062,7 @@ class BCDatasetLMDB(Dataset):
         return statistics
 
     def __len__(self):
-        return self.total_samples
+        return self.num_samples
 
     def _normalize(self, data, statistics, norm_type, epsilon=1e-6):
         if norm_type == 'max_min':
@@ -849,12 +1078,19 @@ class BCDatasetLMDB(Dataset):
     def __getitem__(self, index):
         # Lazy init LMDB env (for multiprocessing DataLoader)
         self._init_env()
+
+        # Map index to actual LMDB key if sampling is enabled
+        if self.sample_indices is not None:
+            actual_index = self.sample_indices[index]
+        else:
+            actual_index = index
+
         # Read from LMDB
         with self.env.begin() as txn:
-            key = f'{index:09d}'.encode()
+            key = f'{actual_index:09d}'.encode()
             value = txn.get(key)
             if value is None:
-                raise IndexError(f"Index {index} not found in LMDB")
+                raise IndexError(f"Index {actual_index} not found in LMDB")
             sample = pickle.loads(value)
 
         # Normalize (only 2 normalizations vs 3 in CalqlDatasetLMDB)
@@ -874,6 +1110,25 @@ class BCDatasetLMDB(Dataset):
             'observations': observations,
             'action': action.astype(np.float32),
         }
+
+    def get_validation_dataset(self):
+        """Create a validation dataset using the remaining episodes not used for training.
+
+        Returns:
+            BCDatasetLMDB: Validation dataset, or None if sample_ratio >= 1.0
+        """
+        if self.validation_sample_indices is None or len(self.validation_sample_indices) == 0:
+            return None
+
+        # Create validation dataset with the remaining indices
+        val_dataset = BCDatasetLMDB(
+            config=self.config,
+            sample_ratio=1.0,  # Not used since we provide validation_indices
+            sample_seed=self.sample_seed,
+            is_validation=True,
+            validation_indices=self.validation_sample_indices
+        )
+        return val_dataset
 
     def __del__(self):
         if hasattr(self, 'env') and self.env is not None:

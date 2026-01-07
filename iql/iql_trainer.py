@@ -80,12 +80,19 @@ class IQLTrainer:
         Args:
             config: Configuration object with hyperparameters
             policy: Policy network π(a|s)
-            qf: Dictionary with 'qf1', 'qf2', 'target_qf1', 'target_qf2'
+            qf: ResNetDoubleQFunction (shared backbone with two heads)
             vf: Value function V(s)
         """
         self.config = config
         self.policy = policy
+        self._policy_module = policy  # Keep reference to original module for method access
         self.qf = qf
+        self._qf_module = qf  # Keep reference to original module for method access
+        self.target_qf = copy.deepcopy(qf)  # Create target Q network
+        self._target_qf_module = self.target_qf
+        # Freeze target network
+        for param in self.target_qf.parameters():
+            param.requires_grad = False
         self.vf = vf
 
         # IQL hyperparameters (from paper)
@@ -99,15 +106,14 @@ class IQLTrainer:
         # Optimizers
         self.optimizers = {}
         self.optimizers['policy'] = optim.Adam(self.policy.parameters(), lr=config.policy_lr)
-        self.optimizers['qf1'] = optim.Adam(self.qf['qf1'].parameters(), lr=config.qf_lr)
-        self.optimizers['qf2'] = optim.Adam(self.qf['qf2'].parameters(), lr=config.qf_lr)
+        self.optimizers['qf'] = optim.Adam(self.qf.parameters(), lr=config.qf_lr)
         self.optimizers['vf'] = optim.Adam(self.vf.parameters(), lr=config.vf_lr)
 
         self._total_steps = 0
         self._modules = [
             self.policy,
-            self.qf['qf1'], self.qf['qf2'],
-            self.qf['target_qf1'], self.qf['target_qf2'],
+            self.qf,
+            self.target_qf,
             self.vf
         ]
 
@@ -122,11 +128,8 @@ class IQLTrainer:
         self.schedulers['policy'] = get_cosine_schedule_with_warmup(
             self.optimizers['policy'], num_warmup_steps, num_training_steps, min_lr_ratio
         )
-        self.schedulers['qf1'] = get_cosine_schedule_with_warmup(
-            self.optimizers['qf1'], num_warmup_steps, num_training_steps, min_lr_ratio
-        )
-        self.schedulers['qf2'] = get_cosine_schedule_with_warmup(
-            self.optimizers['qf2'], num_warmup_steps, num_training_steps, min_lr_ratio
+        self.schedulers['qf'] = get_cosine_schedule_with_warmup(
+            self.optimizers['qf'], num_warmup_steps, num_training_steps, min_lr_ratio
         )
         self.schedulers['vf'] = get_cosine_schedule_with_warmup(
             self.optimizers['vf'], num_warmup_steps, num_training_steps, min_lr_ratio
@@ -145,7 +148,7 @@ class IQLTrainer:
         """Get current learning rates."""
         return {
             'policy_lr': self.optimizers['policy'].param_groups[0]['lr'],
-            'qf_lr': self.optimizers['qf1'].param_groups[0]['lr'],
+            'qf_lr': self.optimizers['qf'].param_groups[0]['lr'],
             'vf_lr': self.optimizers['vf'].param_groups[0]['lr'],
         }
 
@@ -198,9 +201,9 @@ class IQLTrainer:
         # V is trained with expectile regression on Q-values
         # L_V = E[L_τ(Q(s,a) - V(s))] where L_τ is asymmetric L2
         with torch.no_grad():
-            # Use minimum of two Q-functions (Double Q trick)
-            q1 = self.qf['qf1'](observations, images, actions)
-            q2 = self.qf['qf2'](observations, images, actions)
+            # Use target Q-networks for stability (as in official IQL)
+            # Single forward pass through shared backbone
+            q1, q2 = self._target_qf_module(observations, images, actions)
             q_target = torch.min(q1, q2)
 
         v_pred = self.vf(observations, images)
@@ -229,25 +232,22 @@ class IQLTrainer:
             next_v = self.vf(next_observations, next_images)
             q_target = rewards.view(-1, 1) + (1.0 - dones.view(-1, 1)) * self.discount * next_v
 
-        q1_pred = self.qf['qf1'](observations, images, actions)
-        q2_pred = self.qf['qf2'](observations, images, actions)
+        # Single forward pass through shared backbone for both Q1 and Q2
+        q1_pred, q2_pred = self.qf(observations, images, actions)
 
         qf1_loss = nn.functional.mse_loss(q1_pred, q_target)
         qf2_loss = nn.functional.mse_loss(q2_pred, q_target)
+        qf_loss = qf1_loss + qf2_loss
 
-        self.optimizers['qf1'].zero_grad()
-        qf1_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.qf['qf1'].parameters(), self.max_grad_norm)
-        self.optimizers['qf1'].step()
-
-        self.optimizers['qf2'].zero_grad()
-        qf2_loss.backward()
-        torch.nn.utils.clip_grad_norm_(self.qf['qf2'].parameters(), self.max_grad_norm)
-        self.optimizers['qf2'].step()
+        self.optimizers['qf'].zero_grad()
+        qf_loss.backward()
+        torch.nn.utils.clip_grad_norm_(self.qf.parameters(), self.max_grad_norm)
+        self.optimizers['qf'].step()
 
         info.update({
             'critic/qf1_loss': qf1_loss.item(),
             'critic/qf2_loss': qf2_loss.item(),
+            'critic/qf_loss': qf_loss.item(),
             'critic/q1_pred_mean': q1_pred.mean().item(),
             'critic/q2_pred_mean': q2_pred.mean().item(),
             'critic/q_target_mean': q_target.mean().item(),
@@ -259,8 +259,8 @@ class IQLTrainer:
         with torch.no_grad():
             # Compute advantage A = Q - V
             v = self.vf(observations, images)
-            q1 = self.qf['qf1'](observations, images, actions)
-            q2 = self.qf['qf2'](observations, images, actions)
+            # Single forward pass for both Q values
+            q1, q2 = self._qf_module(observations, images, actions)
             q = torch.min(q1, q2)
             advantage = q - v
 
@@ -269,7 +269,7 @@ class IQLTrainer:
             weights = torch.clamp(weights, max=self.clip_score)
 
         # Log probability of dataset actions under current policy
-        log_prob = self.policy.log_prob(observations, images, actions)
+        log_prob = self._policy_module.log_prob(observations, images, actions)
 
         # Advantage-weighted regression loss
         # Maximize weighted log probability: minimize -weight * log_prob
@@ -298,18 +298,15 @@ class IQLTrainer:
     @torch.no_grad()
     def _soft_update_target_networks(self):
         """Soft update target Q-networks."""
-        for target_qf, qf in [('target_qf1', 'qf1'), ('target_qf2', 'qf2')]:
-            for target_param, param in zip(self.qf[target_qf].parameters(), self.qf[qf].parameters()):
-                target_param.data.lerp_(param.data, self.tau)
+        for target_param, param in zip(self.target_qf.parameters(), self.qf.parameters()):
+            target_param.data.lerp_(param.data, self.tau)
 
     def to_device(self, device):
         """Move all models to device."""
         self.device = device
         self.policy.to(device)
-        self.qf['qf1'].to(device)
-        self.qf['qf2'].to(device)
-        self.qf['target_qf1'].to(device)
-        self.qf['target_qf2'].to(device)
+        self.qf.to(device)
+        self.target_qf.to(device)
         self.vf.to(device)
 
     def compile(self, mode="default"):
@@ -318,10 +315,8 @@ class IQLTrainer:
             print("torch.compile disabled")
             return
         self.policy = torch.compile(self.policy, mode=mode)
-        self.qf['qf1'] = torch.compile(self.qf['qf1'], mode=mode)
-        self.qf['qf2'] = torch.compile(self.qf['qf2'], mode=mode)
-        self.qf['target_qf1'] = torch.compile(self.qf['target_qf1'], mode=mode)
-        self.qf['target_qf2'] = torch.compile(self.qf['target_qf2'], mode=mode)
+        self.qf = torch.compile(self.qf, mode=mode)
+        self.target_qf = torch.compile(self.target_qf, mode=mode)
         self.vf = torch.compile(self.vf, mode=mode)
         print(f"Compiled models with mode={mode}")
 
@@ -344,14 +339,17 @@ class IQLTrainer:
 
         # Wrap models with DDP
         self.policy = DDP(self.policy, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
-        self.qf['qf1'] = DDP(self.qf['qf1'], device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
-        self.qf['qf2'] = DDP(self.qf['qf2'], device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
+        self.qf = DDP(self.qf, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
         self.vf = DDP(self.vf, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
+
+        # Keep reference to underlying modules for method access
+        self._policy_module = self.policy.module
+        self._qf_module = self.qf.module
+        self._target_qf_module = self.target_qf  # target_qf is not wrapped in DDP
 
         # Recreate optimizers for DDP models
         self.optimizers['policy'] = optim.Adam(self.policy.parameters(), lr=self.config.policy_lr)
-        self.optimizers['qf1'] = optim.Adam(self.qf['qf1'].parameters(), lr=self.config.qf_lr)
-        self.optimizers['qf2'] = optim.Adam(self.qf['qf2'].parameters(), lr=self.config.qf_lr)
+        self.optimizers['qf'] = optim.Adam(self.qf.parameters(), lr=self.config.qf_lr)
         self.optimizers['vf'] = optim.Adam(self.vf.parameters(), lr=self.config.vf_lr)
 
         print(f"[Rank {dist.get_rank()}] IQL Trainer multi-GPU setup complete. Device: {device}")
@@ -360,10 +358,8 @@ class IQLTrainer:
         """Save training checkpoint."""
         checkpoint = {
             'policy_state_dict': self.policy.state_dict(),
-            'qf1_state_dict': self.qf['qf1'].state_dict(),
-            'qf2_state_dict': self.qf['qf2'].state_dict(),
-            'target_qf1_state_dict': self.qf['target_qf1'].state_dict(),
-            'target_qf2_state_dict': self.qf['target_qf2'].state_dict(),
+            'qf_state_dict': self.qf.state_dict(),
+            'target_qf_state_dict': self.target_qf.state_dict(),
             'vf_state_dict': self.vf.state_dict(),
             'optimizers_state_dict': {k: v.state_dict() for k, v in self.optimizers.items()},
             'total_steps': self._total_steps,
@@ -377,10 +373,8 @@ class IQLTrainer:
         """Load training checkpoint."""
         checkpoint = torch.load(filepath, map_location=self.device)
         self.policy.load_state_dict(checkpoint['policy_state_dict'])
-        self.qf['qf1'].load_state_dict(checkpoint['qf1_state_dict'])
-        self.qf['qf2'].load_state_dict(checkpoint['qf2_state_dict'])
-        self.qf['target_qf1'].load_state_dict(checkpoint['target_qf1_state_dict'])
-        self.qf['target_qf2'].load_state_dict(checkpoint['target_qf2_state_dict'])
+        self.qf.load_state_dict(checkpoint['qf_state_dict'])
+        self.target_qf.load_state_dict(checkpoint['target_qf_state_dict'])
         self.vf.load_state_dict(checkpoint['vf_state_dict'])
         for k, v in self.optimizers.items():
             if k in checkpoint['optimizers_state_dict']:

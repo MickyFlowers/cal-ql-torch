@@ -11,6 +11,10 @@ save_model: false
 batch_size: 32
 num_workers: 4
 
+# Preload dataset to memory for zero I/O latency at epoch boundaries
+# Requires ~33GB RAM for typical datasets, but eliminates 40-50s wait per epoch
+preload_to_memory: true
+
 # Architecture & policy hyperparameters
 hidden_dim: 256
 orthogonal_init: true
@@ -23,13 +27,13 @@ policy_log_std_offset: -1.0
 train_policy_backbone: true
 
 # Q-function network architecture
-q_obs_proj_arch: '256-256-256-256'
-q_out_proj_arch: '256-256-256-256'
+q_obs_proj_arch: '256-256'
+q_out_proj_arch: '256-256'
 train_q_backbone: true
 
 # V-function network architecture (unique to IQL)
-v_obs_proj_arch: '256-256-256-256'
-v_out_proj_arch: '256-256-256-256'
+v_obs_proj_arch: '256-256'
+v_out_proj_arch: '256-256'
 train_v_backbone: true
 
 # Training schedule
@@ -50,3 +54,4 @@ load_ckpt_path: ""
 
 # Device
 device: cuda:0
+discount: 0.99

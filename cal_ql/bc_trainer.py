@@ -17,6 +17,7 @@ from utils.utils import prefix_metrics
 class BehaviorCloneTrainer(object):
     def __init__(self, lr, policy):
         self.policy = policy
+        self._policy_module = policy  # Keep reference to original module for method access
         self.lr = lr
 
         self.optimizers = {}
@@ -41,9 +42,9 @@ class BehaviorCloneTrainer(object):
         # next_observations = batch["next_observations"]
         # dones = batch["dones"]
         
-        # Policy forward
+        # Policy forward (use _policy_module for method access when wrapped by DDP)
         with autocast(device_type=observations.device.type, enabled=torch.is_autocast_enabled()):
-            log_probs = self.policy.log_prob(observations, images, actions)
+            log_probs = self._policy_module.log_prob(observations, images, actions)
             policy_loss = -log_probs.mean()
 
         self.optimizers["policy"].zero_grad()
@@ -82,6 +83,8 @@ class BehaviorCloneTrainer(object):
         self.to_device(device)
 
         self.policy = DDP(self.policy, device_ids=[local_rank], output_device=local_rank, broadcast_buffers=False)
+        # Update _policy_module to point to the underlying module after DDP wrap
+        self._policy_module = self.policy.module
 
         # Recreate optimizer for DDP model
         self.optimizers["policy"] = torch.optim.Adam(self.policy.parameters(), lr=self.lr)
@@ -105,3 +108,24 @@ class BehaviorCloneTrainer(object):
             'total_steps': self._total_steps,
         }
         torch.save(checkpoint, filepath)
+
+    @torch.no_grad()
+    def evaluate(self, batch):
+        """Evaluate on a batch without computing gradients or updating weights."""
+        observations = batch["observations"]['proprio'].to(self.device)
+        images = batch["observations"]['image'].to(self.device)
+        actions = batch["action"].to(self.device)
+
+        # Policy forward (use _policy_module for method access when wrapped by DDP)
+        with autocast(device_type=observations.device.type, enabled=torch.is_autocast_enabled()):
+            log_probs = self._policy_module.log_prob(observations, images, actions)
+            policy_loss = -log_probs.mean()
+
+        metrics = prefix_metrics(
+            dict(
+                policy_loss=policy_loss,
+                log_prob=log_probs.mean(),
+            ),
+            "val"
+        )
+        return metrics

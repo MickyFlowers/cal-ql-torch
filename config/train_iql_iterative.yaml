@@ -1,0 +1,76 @@
+# Iterative IQL Training Configuration
+# Human-in-the-loop reinforcement learning with SpaceMouse intervention
+
+defaults:
+  - iql: iql_defaults
+  - logging: logging_defaults
+  - env: env
+
+# Device
+device: cuda:0
+seed: 42
+
+# Model dimensions
+observation_dim: 6
+action_dim: 6
+hidden_dim: 256
+
+# Policy network architecture
+policy_obs_proj_arch: '256-256-256-256'
+policy_out_proj_arch: '256-256-256-256'
+policy_log_std_multiplier: 1.0
+policy_log_std_offset: -1.0
+train_policy_backbone: true
+orthogonal_init: true
+
+# Q-function network architecture
+q_obs_proj_arch: '256-256'
+q_out_proj_arch: '256-256'
+train_q_backbone: true
+
+# V-function network architecture
+v_obs_proj_arch: '256-256'
+v_out_proj_arch: '256-256'
+train_v_backbone: true
+
+# Image processing
+image_resize: 256
+image_size: 224
+
+# Normalization
+proprio_norm_type: max_min
+action_norm_type: max_min
+
+# Paths
+statistics_path: ./dataset/statistics.yaml
+buffer_path: ./replay_buffer
+ckpt_path: ./checkpoints
+load_ckpt_path: ""  # Path to pretrained checkpoint
+
+# Iterative training settings
+num_iterations: 10              # Total number of collect-train iterations
+on_policy_episodes: 5           # Episodes to collect per iteration
+train_steps_per_iter: 1000      # Training steps per iteration
+batch_size: 32
+
+# Rollout settings
+max_steps_per_episode: 500      # Maximum steps per episode
+freq: 30                        # Control loop frequency in Hz
+
+# Learning rate scheduler
+use_lr_scheduler: true
+warmup_ratio: 0.05
+min_lr_ratio: 0.1
+
+# Model compilation
+torch_compile_mode: "disable"
+
+# Checkpointing
+save_every_n_iter: 2
+
+# Buffer settings
+preload_buffer_to_memory: false  # Set true if you have enough RAM
+discount: 0.99
+
+# Logging
+use_wandb: false
