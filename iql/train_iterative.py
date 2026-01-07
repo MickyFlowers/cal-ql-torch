@@ -215,15 +215,30 @@ class IterativeIQLTrainer:
         """
         Rollout a single episode with human intervention support.
 
+        Behavior:
+        - Starts with policy control
+        - Once teleop is enabled, it takes over permanently for this episode
+        - When teleop is disabled (enable_teleop: True -> False), episode ends as SUCCESS
+        - Human intervention guarantees success
+        - Without teleop, use 's'/'f' keyboard to mark success/failure
+
+        Data collection:
+        - Only records observation and action during rollout
+        - next_observation, reward, done are computed after episode ends via process()
+
         Returns:
-            episode_buffer: Buffer containing episode transitions.
-            success: Whether the episode was successful (determined by human feedback).
+            episode_buffer: Buffer containing episode data.
+            success: Whether the episode was successful.
             stats: Dictionary of episode statistics.
         """
         episode_buffer = EpisodeBuffer()
         step_count = 0
         intervention_count = 0
         success = None
+
+        # Track teleop state: once True, stays in teleop mode
+        teleop_activated = False
+        prev_enable_teleop = False
 
         # Set policy to eval mode for rollout
         self.policy.eval()
@@ -234,8 +249,9 @@ class IterativeIQLTrainer:
             self.env.wait_for_obs()
 
             print("\n--- Episode Start ---")
-            print("Controls: SpaceMouse button 0 = enable teleop, button 1 = disable teleop")
-            print("Keyboard: 's' = success, 'f' = failure, 'q' = quit episode")
+            print("Controls: SpaceMouse button 0 = enable teleop (takes over permanently)")
+            print("          SpaceMouse button 1 = disable teleop (ends episode as SUCCESS)")
+            print("Keyboard: 's' = success, 'f' = failure, 'q' = quit without saving")
 
             while step_count < self.config.max_steps_per_episode:
                 start_time = time.time()
@@ -247,9 +263,22 @@ class IterativeIQLTrainer:
                 # Check SpaceMouse state
                 space_mouse_twist, enable_teleop = self.env.get_space_mouse_state()
 
+                # Once teleop is activated, it stays activated for this episode
+                if enable_teleop and not teleop_activated:
+                    teleop_activated = True
+                    print("\n[TELEOP ACTIVATED] Human takes over control")
+
+                # Check if teleop was disabled (True -> False): episode ends as SUCCESS
+                if teleop_activated and prev_enable_teleop and not enable_teleop:
+                    success = True
+                    print("\n[SUCCESS] Teleop disabled - Episode completed successfully")
+                    break
+
+                prev_enable_teleop = enable_teleop
+
                 # Determine action source
-                if enable_teleop and np.linalg.norm(space_mouse_twist) > 0.01:
-                    # Human intervention: use SpaceMouse velocity
+                if teleop_activated:
+                    # Human intervention: use SpaceMouse velocity (even if twist is small)
                     teleop_scale = np.array(self.config.env.teleop_twist_scale, dtype=np.float32)
                     velocity = space_mouse_twist * teleop_scale
                     is_intervention = True
@@ -267,65 +296,67 @@ class IterativeIQLTrainer:
                 if elapsed < 1.0 / self.config.freq:
                     time.sleep(1.0 / self.config.freq - elapsed)
 
-                # Get next observation
-                next_observation = self.env.get_observation()
-
-                # Store transition (reward will be set later based on success/failure)
+                # Store observation and action only
+                # next_observation, reward, done will be computed after episode ends
                 episode_buffer.add(
                     observation={
                         'ft_obs': proprio.copy(),
                         'img_obs': observation['img_obs'],
                     },
                     action=velocity.copy(),
-                    reward=0.0,  # Placeholder, will be updated based on success
-                    next_observation={
-                        'ft_obs': next_observation['ft_obs'].copy(),
-                        'img_obs': next_observation['img_obs'],
-                    },
-                    done=False,
                     is_intervention=is_intervention,
                 )
 
                 step_count += 1
 
-                # Check keyboard for episode termination
+                # Check keyboard for episode control
                 key = self.env.get_key()
-                if key == 's':
-                    success = True
-                    print("\n[SUCCESS] Episode marked as successful")
-                    break
-                elif key == 'f':
-                    success = False
-                    print("\n[FAILURE] Episode marked as failed")
-                    break
-                elif key == 'q':
+                if key == 'q':
                     print("\n[QUIT] Episode cancelled")
                     episode_buffer.reset()
                     return None, None, None
+                elif key == 's' and not teleop_activated:
+                    # Manual success mark (only when not in teleop mode)
+                    success = True
+                    print("\n[SUCCESS] Episode marked as successful")
+                    break
+                elif key == 'f' and not teleop_activated:
+                    # Manual failure mark (only when not in teleop mode)
+                    success = False
+                    print("\n[FAILURE] Episode marked as failed")
+                    break
 
                 # Print progress
                 if step_count % 50 == 0:
                     interv_pct = 100 * intervention_count / step_count if step_count > 0 else 0
+                    mode = "TELEOP" if teleop_activated else "POLICY"
                     print(f"Step {step_count}/{self.config.max_steps_per_episode}, "
-                          f"Intervention: {interv_pct:.1f}%")
+                          f"Mode: {mode}, Intervention: {interv_pct:.1f}%")
 
         except Exception as e:
             print(f"Error during rollout: {e}")
             traceback.print_exc()
             return None, None, None
 
-        # If episode ended without explicit success/failure, ask user
+        # If episode ended by max steps without explicit termination
         if success is None:
-            print("\nEpisode ended. Press 's' for success or 'f' for failure:")
-            while success is None:
-                key = self.env.get_key()
-                if key == 's':
-                    success = True
-                    print("[SUCCESS]")
-                elif key == 'f':
-                    success = False
-                    print("[FAILURE]")
-                time.sleep(0.1)
+            if teleop_activated:
+                # Teleop was active but didn't end normally - still count as success
+                # since human was in control
+                success = True
+                print("\n[SUCCESS] Max steps reached with teleop active")
+            else:
+                # Policy ran to max steps without teleop - ask user
+                print("\nEpisode ended (max steps). Press 's' for success or 'f' for failure:")
+                while success is None:
+                    key = self.env.get_key()
+                    if key == 's':
+                        success = True
+                        print("[SUCCESS]")
+                    elif key == 'f':
+                        success = False
+                        print("[FAILURE]")
+                    time.sleep(0.1)
 
         stats = {
             'steps': step_count,

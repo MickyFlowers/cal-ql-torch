@@ -23,7 +23,13 @@ from xlib.algo.utils.image_utils import np_buffer_to_pil_image
 
 
 class EpisodeBuffer:
-    """Temporary buffer for collecting a single episode before saving to disk."""
+    """
+    Temporary buffer for collecting a single episode before saving to disk.
+
+    During rollout, only observations and actions are recorded.
+    After episode ends, call process() to generate full transition data
+    (next_observations, rewards, dones).
+    """
 
     def __init__(self):
         self.reset()
@@ -31,33 +37,77 @@ class EpisodeBuffer:
     def reset(self):
         self.observations = []  # List of {ft_obs, img_obs}
         self.actions = []
+        self.is_intervention = []  # Whether this step was human intervention
+
+        # These are filled by process() after episode ends
+        self.next_observations = []
         self.rewards = []
         self.dones = []
-        self.next_observations = []  # List of {ft_obs, img_obs}
-        self.is_intervention = []  # Whether this step was human intervention
+        self._processed = False
 
     def add(
         self,
         observation: Dict[str, np.ndarray],
         action: np.ndarray,
-        reward: float,
-        next_observation: Dict[str, np.ndarray],
-        done: bool,
         is_intervention: bool = False,
     ):
-        """Add a single transition to the episode buffer."""
+        """
+        Add a single step to the episode buffer during rollout.
+        Only records observation and action - next_obs/reward/done are computed later.
+        """
         self.observations.append(observation)
         self.actions.append(action)
-        self.rewards.append(reward)
-        self.next_observations.append(next_observation)
-        self.dones.append(done)
         self.is_intervention.append(is_intervention)
+
+    def process(self, success: bool):
+        """
+        Process the episode after it ends to generate full transition data.
+
+        Args:
+            success: Whether the episode was successful (determines final reward).
+
+        This method:
+        1. Generates next_observations by shifting observations
+        2. Sets sparse reward (1.0 at last step if success, else 0.0)
+        3. Sets done flags (1.0 at last step)
+        """
+        if self._processed:
+            return
+
+        episode_length = len(self.observations)
+        if episode_length == 0:
+            return
+
+        # Generate next_observations: obs[t+1] for each obs[t]
+        # For the last step, next_obs = current obs (terminal state)
+        self.next_observations = []
+        for i in range(episode_length):
+            if i < episode_length - 1:
+                self.next_observations.append(self.observations[i + 1])
+            else:
+                # Last step: next_obs is the same as current obs (terminal)
+                self.next_observations.append(self.observations[i])
+
+        # Set rewards: sparse reward at the end
+        self.rewards = [0.0] * episode_length
+        if success:
+            self.rewards[-1] = 1.0
+
+        # Set dones: only the last step is done
+        self.dones = [0.0] * episode_length
+        self.dones[-1] = 1.0
+
+        self._processed = True
 
     def __len__(self):
         return len(self.observations)
 
     def is_empty(self):
         return len(self.observations) == 0
+
+    @property
+    def is_processed(self):
+        return self._processed
 
 
 class HDF5ReplayBuffer:
@@ -202,6 +252,11 @@ class HDF5ReplayBuffer:
         if episode_buffer.is_empty():
             return None
 
+        # Process episode data if not already processed
+        # This generates next_observations, rewards, dones from raw observations/actions
+        if not episode_buffer.is_processed:
+            episode_buffer.process(success)
+
         # Determine episode index
         if episode_idx is None:
             existing_files = glob.glob(os.path.join(self.save_dir, "episode_*.hdf5"))
@@ -226,7 +281,7 @@ class HDF5ReplayBuffer:
         img_obs_list = [obs['img_obs'] for obs in episode_buffer.observations]
         next_img_obs_list = [obs['img_obs'] for obs in episode_buffer.next_observations]
 
-        # Set rewards based on success
+        # Get rewards and dones from processed episode buffer
         episode_length = len(episode_buffer)
         rewards = np.zeros(episode_length, dtype=np.float32)
         if success:
