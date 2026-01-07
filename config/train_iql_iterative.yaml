@@ -45,7 +45,12 @@ action_norm_type: max_min
 statistics_path: ./dataset/statistics.yaml
 buffer_path: ./replay_buffer
 ckpt_path: ./checkpoints
-load_ckpt_path: ""  # Path to pretrained checkpoint
+
+# Checkpoint loading (choose one):
+# - bc_ckpt_path: Load only BC policy, Q and V are randomly initialized (recommended for starting from BC)
+# - load_ckpt_path: Load full IQL checkpoint (policy + Q + V)
+bc_ckpt_path: ""      # Path to BC pretrained policy checkpoint (policy only)
+load_ckpt_path: ""    # Path to full IQL checkpoint (policy + Q + V)
 
 # Iterative training settings
 num_iterations: 10              # Total number of collect-train iterations

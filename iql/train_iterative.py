@@ -180,13 +180,36 @@ class IterativeIQLTrainer:
         self.iql_trainer.to_device(self.device)
 
         # Load checkpoint if provided
-        if config.load_ckpt_path and os.path.exists(config.load_ckpt_path):
-            print(f"Loading checkpoint from {config.load_ckpt_path}")
+        # Priority: bc_ckpt_path (BC policy only) > load_ckpt_path (full IQL checkpoint)
+        bc_ckpt_path = config.get('bc_ckpt_path', '')
+        if bc_ckpt_path and os.path.exists(bc_ckpt_path):
+            # Load only BC policy weights, Q and V remain randomly initialized
+            print(f"Loading BC policy checkpoint from {bc_ckpt_path}")
+            self._load_bc_checkpoint(bc_ckpt_path)
+        elif config.load_ckpt_path and os.path.exists(config.load_ckpt_path):
+            # Load full IQL checkpoint (policy + Q + V)
+            print(f"Loading full IQL checkpoint from {config.load_ckpt_path}")
             self.iql_trainer.load_checkpoint(config.load_ckpt_path)
 
         # Compile models if enabled
         if config.torch_compile_mode != "disable":
             self.iql_trainer.compile(mode=config.torch_compile_mode)
+
+    def _load_bc_checkpoint(self, filepath: str):
+        """
+        Load only policy weights from a BC checkpoint.
+        Q and V networks remain randomly initialized.
+
+        This is useful for starting iterative training from a BC pretrained policy
+        without having pretrained Q and V networks.
+
+        Args:
+            filepath: Path to BC checkpoint file.
+        """
+        checkpoint = torch.load(filepath, map_location=self.device)
+        self.policy.load_state_dict(checkpoint['policy_state_dict'])
+        print(f"Loaded BC policy from {filepath}")
+        print("Note: Q and V networks are randomly initialized (no pretrained weights)")
 
     def rollout_episode(self) -> tuple:
         """
