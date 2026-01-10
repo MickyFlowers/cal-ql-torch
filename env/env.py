@@ -10,6 +10,7 @@ from geometry_msgs.msg import Twist, WrenchStamped
 from scipy.spatial.transform import Rotation as R
 from sensor_msgs.msg import Image
 from std_msgs.msg import Int8MultiArray
+from std_srvs.srv import Trigger
 from xlib.algo.controller import VelocityAdmittanceController
 from xlib.algo.utils.transforms import *
 from xlib.device.keyboard import KeyboardReader
@@ -81,6 +82,9 @@ class UrEnv(gym.Env):
         self.timer = rospy.Timer(rospy.Duration(1.0 / config.ctrl_freq), self._control_loop)
         self._spin_thread = threading.Thread(target=self._spin, daemon=True)
         self._spin_thread.start()
+
+        # F/T sensor reset service client
+        self.ft_reset_service = rospy.ServiceProxy('ft_sensor_reset', Trigger)
 
     def _spacemouse_callback(self, twist_msg: Twist):
         """Process SpaceMouse twist input as velocity command."""
@@ -214,6 +218,17 @@ class UrEnv(gym.Env):
         self.ur_robot.moveToPose(first_reset_pose, asynchronous=False)
         self.ur_robot.moveToPose(reset_pose, asynchronous=False)
         self.ur_robot.reset_servo_target()
+
+        # Reset F/T sensor bias
+        try:
+            response = self.ft_reset_service()
+            if response.success:
+                print("F/T sensor bias reset successfully")
+            else:
+                print(f"F/T sensor reset failed: {response.message}")
+        except rospy.ServiceException as e:
+            print(f"F/T sensor reset service call failed: {e}")
+
         rospy.Rate(1).sleep()
         self.wait_for_obs()
         print("Environment reset done.")

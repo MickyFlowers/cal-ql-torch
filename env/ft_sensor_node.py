@@ -1,6 +1,7 @@
 import hydra
 import rospy
 from geometry_msgs.msg import WrenchStamped
+from std_srvs.srv import Trigger, TriggerResponse
 from xlib.algo.filter import MovingAverageFilter
 from xlib.device.sensor import Ft300sSensor
 
@@ -12,6 +13,20 @@ class FtSensorNode:
         self.filter = MovingAverageFilter(config.ft_filter_window_size)
         self.pub = rospy.Publisher('ft_filtered', WrenchStamped, queue_size=10)
         self.rate = rospy.Rate(config.ft_read_freq)
+
+        # Reset service
+        self.reset_service = rospy.Service('ft_sensor_reset', Trigger, self._reset_callback)
+
+    def _reset_callback(self, req):
+        """Reset the F/T sensor bias."""
+        try:
+            self.ft_sensor.reset_bias()
+            self.filter.reset()
+            rospy.loginfo("F/T sensor bias reset successfully")
+            return TriggerResponse(success=True, message="F/T sensor bias reset successfully")
+        except Exception as e:
+            rospy.logerr(f"Failed to reset F/T sensor bias: {e}")
+            return TriggerResponse(success=False, message=str(e))
 
     def run(self):
         while not rospy.is_shutdown():
