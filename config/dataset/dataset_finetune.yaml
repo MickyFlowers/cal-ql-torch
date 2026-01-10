@@ -1,0 +1,8 @@
+old_root_path: ./dataset/processed_old
+new_root_path: ./dataset/processed_new
+image_resize: 256
+image_size: 224
+norm_type: max_min
+reward_scale: 10.0
+reward_bias: 0.0
+discount: ${discount}

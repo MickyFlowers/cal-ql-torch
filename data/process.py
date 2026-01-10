@@ -8,8 +8,12 @@ from tqdm import tqdm
 
 
 def process(args):
-    dataset_folder = args.data_root
-    new_folder = os.path.join(os.path.dirname(dataset_folder), os.path.basename(dataset_folder).replace("raw", "processed"))
+    dataset_folder = os.path.normpath(os.path.expanduser(args.data_root))
+    base_name = os.path.basename(dataset_folder)
+    if base_name == "":
+        raise ValueError(f"Invalid data_root: {args.data_root}")
+    new_base_name = base_name.replace("raw", "processed", 1)
+    new_folder = os.path.join(os.path.dirname(dataset_folder), new_base_name)
     os.makedirs(new_folder, exist_ok=True)
     episode_files = glob.glob(os.path.join(dataset_folder, "*.hdf5"))
     print(f"Loading {len(episode_files)} episodes")

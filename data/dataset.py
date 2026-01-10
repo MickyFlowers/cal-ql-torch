@@ -1,3 +1,4 @@
+import copy
 import glob
 import io
 import os
@@ -849,7 +850,8 @@ class BCDatasetLMDB(Dataset):
     """
 
     def __init__(self, config: DictConfig, sample_ratio: float = 1.0, sample_seed: int = 42,
-                 is_validation: bool = False, validation_indices: np.ndarray = None):
+                 is_validation: bool = False, validation_indices: np.ndarray = None,
+                 statistics_override: dict = None):
         """
         Args:
             config: Dataset configuration
@@ -901,9 +903,12 @@ class BCDatasetLMDB(Dataset):
         else:
             print(f"Loading from existing LMDB cache: {self.lmdb_path}")
 
-        # Load statistics
+        # Load statistics (optionally override for mixed datasets)
         self.statics_file = os.path.join(self.root_path, "statistics.yaml")
-        self.statistics = self._parser_statstics(self.statics_file)
+        if statistics_override is not None:
+            self.statistics = statistics_override
+        else:
+            self.statistics = self._parser_statstics(self.statics_file)
 
         # Lazy initialization for LMDB environment (for multiprocessing compatibility)
         self.env = None
@@ -1126,13 +1131,101 @@ class BCDatasetLMDB(Dataset):
             sample_ratio=1.0,  # Not used since we provide validation_indices
             sample_seed=self.sample_seed,
             is_validation=True,
-            validation_indices=self.validation_sample_indices
+            validation_indices=self.validation_sample_indices,
+            statistics_override=self.statistics
         )
         return val_dataset
 
     def __del__(self):
         if hasattr(self, 'env') and self.env is not None:
             self.env.close()
+
+
+class BCDatasetLMDBMix(Dataset):
+    """
+    Mix two BC datasets (old + new) with 1:1 sampling.
+
+    Each sample is drawn from old/new datasets alternately. The smaller dataset
+    is oversampled by wrapping indices so the overall ratio stays 1:1.
+    """
+
+    def __init__(self, config: DictConfig, sample_seed: int = 42):
+        super().__init__()
+        self.config = config
+        self.sample_seed = sample_seed
+        if getattr(config, "norm_type", "max_min") != "max_min":
+            raise ValueError("BCDatasetLMDBMix currently supports norm_type='max_min' only.")
+
+        if not hasattr(config, "old_root_path") or not hasattr(config, "new_root_path"):
+            raise ValueError("Config must provide old_root_path and new_root_path.")
+
+        self.old_root_path = config.old_root_path
+        self.new_root_path = config.new_root_path
+
+        old_stats = self._load_or_calc_stats(self.old_root_path)
+        new_stats = self._load_or_calc_stats(self.new_root_path)
+        self.statistics = self._merge_statistics(old_stats, new_stats)
+
+        old_cfg = copy.deepcopy(config)
+        old_cfg.root_path = self.old_root_path
+        new_cfg = copy.deepcopy(config)
+        new_cfg.root_path = self.new_root_path
+
+        self.old_dataset = BCDatasetLMDB(
+            old_cfg,
+            sample_ratio=1.0,
+            sample_seed=sample_seed,
+            statistics_override=self.statistics,
+        )
+        self.new_dataset = BCDatasetLMDB(
+            new_cfg,
+            sample_ratio=1.0,
+            sample_seed=sample_seed,
+            statistics_override=self.statistics,
+        )
+
+        self.old_len = len(self.old_dataset)
+        self.new_len = len(self.new_dataset)
+        if self.old_len == 0 or self.new_len == 0:
+            raise ValueError("Both old and new datasets must contain samples.")
+
+        self.num_samples = 2 * max(self.old_len, self.new_len)
+
+    def _load_or_calc_stats(self, root_path: str):
+        stats_file = os.path.join(root_path, "statistics.yaml")
+        if not os.path.exists(stats_file):
+            episode_files = sorted(glob.glob(os.path.join(root_path, "*.hdf5")))
+            if not episode_files:
+                raise ValueError(f"No HDF5 files found in {root_path}")
+            calc_statics(root_path, episode_files)
+        with open(stats_file, "r") as f:
+            return yaml.safe_load(f)
+
+    def _merge_statistics(self, stats_old: dict, stats_new: dict):
+        merged = {}
+        for key in ["proprio", "action"]:
+            if key not in stats_old or key not in stats_new:
+                raise ValueError(f"Missing '{key}' in statistics files.")
+            if "max" not in stats_old[key] or "min" not in stats_old[key]:
+                raise ValueError(f"Statistics for '{key}' must include max/min.")
+            merged[key] = {
+                "max": np.maximum(stats_old[key]["max"], stats_new[key]["max"]).tolist(),
+                "min": np.minimum(stats_old[key]["min"], stats_new[key]["min"]).tolist(),
+            }
+        return merged
+
+    def __len__(self):
+        return self.num_samples
+
+    def __getitem__(self, index):
+        if index % 2 == 0:
+            sample_index = (index // 2) % self.old_len
+            return self.old_dataset[sample_index]
+        sample_index = (index // 2) % self.new_len
+        return self.new_dataset[sample_index]
+
+    def get_validation_dataset(self):
+        return None
 
 
 class FlowMatchingDatasetLMDB(Dataset):
