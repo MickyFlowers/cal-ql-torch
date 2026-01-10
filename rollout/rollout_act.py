@@ -143,8 +143,8 @@ def main(config):
                 # Extract observations - use ft_obs as proprio (same as training dataset)
                 proprio = observation["ft_obs"]
 
-                # Subtract F/T bias (first frame mean from training data)
-                proprio = proprio - ft_bias
+                # Add F/T bias (first frame mean from training data)
+                proprio = proprio + ft_bias
 
                 # Normalize proprioception
                 proprio = normalize(proprio, statistics['proprio'], config.proprio_norm_type)

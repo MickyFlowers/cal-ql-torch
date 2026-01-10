@@ -165,8 +165,8 @@ def main(config):
                     # Policy mode: get velocity from policy
                     # Use ft_obs as proprio (same as training dataset)
                     proprio = observation["ft_obs"]
-                    # Subtract F/T bias (first frame mean from training data)
-                    proprio = proprio - ft_bias
+                    # Add F/T bias (first frame mean from training data)
+                    proprio = proprio + ft_bias
                     proprio = normalize(proprio, statistics['proprio'], config.proprio_norm_type)
                     proprio_tensor = torch.tensor(
                         proprio, dtype=torch.float32
