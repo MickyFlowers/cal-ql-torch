@@ -114,6 +114,9 @@ def main(config):
         with open(local_statistics_file, 'r') as f:
             statistics = yaml.safe_load(f)
 
+        # Load F/T bias for first frame correction
+        ft_bias = np.array(statistics.get('ft_bias', [0.0] * 6), dtype=np.float32)
+
         count = 0
         saver = HDF5BlockSaver(config.save_path, idx=num_episodes)
         online_ckpt_file = None
@@ -162,6 +165,8 @@ def main(config):
                     # Policy mode: get velocity from policy
                     # Use ft_obs as proprio (same as training dataset)
                     proprio = observation["ft_obs"]
+                    # Subtract F/T bias (first frame mean from training data)
+                    proprio = proprio - ft_bias
                     proprio = normalize(proprio, statistics['proprio'], config.proprio_norm_type)
                     proprio_tensor = torch.tensor(
                         proprio, dtype=torch.float32

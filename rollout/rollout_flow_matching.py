@@ -129,6 +129,9 @@ def main(config):
         with open(config.statistics_path, 'r') as f:
             statistics = yaml.safe_load(f)
 
+        # Load F/T bias for first frame correction
+        ft_bias = np.array(statistics.get('ft_bias', [0.0] * 6), dtype=np.float32)
+
         # Setup data saver if save_data is enabled
         saver = None
         if config.get('save_data', False):
@@ -149,6 +152,9 @@ def main(config):
             observation = env.get_observation()
             # Extract observations - use ft_obs as proprio (same as training dataset)
             proprio = observation["ft_obs"]
+
+            # Subtract F/T bias (first frame mean from training data)
+            proprio = proprio - ft_bias
 
             # Normalize proprioception
             proprio = normalize(proprio, statistics['proprio'], config.proprio_norm_type)

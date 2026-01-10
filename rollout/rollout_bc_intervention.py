@@ -95,6 +95,9 @@ def main(config):
         with open(config.statistics_path, "r") as f:
             statistics = yaml.safe_load(f)
 
+        # Load F/T bias for first frame correction
+        ft_bias = np.array(statistics.get("ft_bias", [0.0] * 6), dtype=np.float32)
+
         saver = None
         if config.get("save_data", True):
             os.makedirs(config.save_path, exist_ok=True)
@@ -133,6 +136,8 @@ def main(config):
                         break
 
                     proprio = observation["ft_obs"]
+                    # Subtract F/T bias (first frame mean from training data)
+                    proprio = proprio - ft_bias
                     proprio = normalize(proprio, statistics["proprio"], config.proprio_norm_type)
                     proprio_tensor = torch.tensor(
                         proprio, dtype=torch.float32
