@@ -9,6 +9,7 @@ Usage:
     Multi GPU:   torchrun --nproc_per_node=N -m cal_ql.train_bc [args]
 """
 
+import yaml
 import os
 import time
 
@@ -23,13 +24,8 @@ from tqdm import tqdm
 from cal_ql.bc_trainer import BehaviorCloneTrainer
 from data.dataset import BCDatasetLMDB
 from model.model import ResNetPolicy
-from utils.distributed import (
-    barrier,
-    cleanup_distributed,
-    is_main_process,
-    setup_training,
-    sync_metrics,
-)
+from utils.distributed import (barrier, cleanup_distributed, is_main_process,
+                               setup_training, sync_metrics)
 from utils.logger import WandBLogger
 from utils.utils import Timer
 from viskit.logging import logger, setup_logger
@@ -163,9 +159,13 @@ def main(cfg: DictConfig):
         os.makedirs(ckpt_path, exist_ok=True)
         # Save config to checkpoint directory
         config_save_path = os.path.join(ckpt_path, "config.yaml")
+        statistics_save_path = os.path.join(ckpt_path, "statistics.yaml")
         with open(config_save_path, 'w') as f:
             f.write(OmegaConf.to_yaml(cfg))
         print(f"Saved config to {config_save_path}")
+        with open(statistics_save_path, 'w') as f:
+            yaml.safe_dump(train_dataset.statistics, f, default_flow_style=False, allow_unicode=True)
+        print(f"Saved dataset statistics to {statistics_save_path}")
 
     while True:
         metrics = {"epoch": epoch}

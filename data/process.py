@@ -20,7 +20,7 @@ def process(args):
     for episode_file in tqdm(episode_files):
         with h5py.File(episode_file, 'r') as f:
             observations = f['observations']
-            ft_obs = observations['ft_obs'][:]
+            ft_obs = observations['ft_obs'][:] - observations['ft_obs'][0]
             jnt_obs = observations['jnt_obs'][:]
             tcp_obs = observations['tcp_obs'][:]
             img_obs = observations['img_obs'][:]
