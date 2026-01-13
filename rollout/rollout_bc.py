@@ -63,6 +63,8 @@ def main(config):
     # Success/failure counters
     success_count = 0
     failure_count = 0
+    success_times = []
+    episode_results = []  # List of (result, time) tuples: ('S', time) or ('F', None)
 
     try:
         image_transform = transforms.Compose([
@@ -114,6 +116,7 @@ def main(config):
         env.regrasp()
         env.reset()
         step_count = 0
+        episode_start_time = time.time()
         while True:
             while True:
                 start_time = time.time()
@@ -164,14 +167,23 @@ def main(config):
                 # Check keyboard feedback
                 key = env.get_key()
                 if key == 's':
+                    episode_time = time.time() - episode_start_time
+                    success_times.append(episode_time)
+                    episode_results.append(('S', episode_time))
                     success_count += 1
-                    print(f"\n[SUCCESS] Total: success={success_count}, failure={failure_count}")
+                    print(f"\n[SUCCESS] Time: {episode_time:.2f}s, Total: success={success_count}, failure={failure_count}")
+                    print(f"  Average success time: {np.mean(success_times):.2f}s")
+                    print(f"  Results: {' '.join([r[0] for r in episode_results])}")
+                    print(f"  Success times: {[f'{t:.2f}' for r, t in episode_results if r == 'S']}")
                     env.regrasp()
                     env.reset()
+                    episode_start_time = time.time()
                     break
                 elif key == 'f':
+                    episode_results.append(('F', None))
                     failure_count += 1
                     print(f"\n[FAILURE] Total: success={success_count}, failure={failure_count}")
+                    print(f"  Results: {' '.join([r[0] for r in episode_results])}")
                     print("Press 'y' to regrasp and continue...")
                     env.ur_gripper.move_and_wait_for_pos(0, 255, 100)
                     while True:
@@ -184,6 +196,7 @@ def main(config):
                     env.regrasp()
                     env.reset()
                     step_count = 0
+                    episode_start_time = time.time()
                     print("Environment reset complete. Continuing rollout...")
                     break
 
