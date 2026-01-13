@@ -15,10 +15,11 @@ from utils.utils import prefix_metrics
 
 
 class BehaviorCloneTrainer(object):
-    def __init__(self, lr, policy):
+    def __init__(self, lr, policy, input_modality="both"):
         self.policy = policy
         self._policy_module = policy  # Keep reference to original module for method access
         self.lr = lr
+        self.input_modality = self._normalize_modality(input_modality)
 
         self.optimizers = {}
         self.optimizers["policy"] = optim.Adam(self.policy.parameters(), lr=lr)
@@ -36,6 +37,7 @@ class BehaviorCloneTrainer(object):
         observations = batch["observations"]['proprio'].to(self.device)
         images = batch["observations"]['image'].to(self.device)
         actions = batch["action"].to(self.device)
+        observations, images = self._apply_modality_mask(observations, images)
         # observations = batch["observations"]
         # actions = batch["actions"]
         # rewards = batch["rewards"]
@@ -115,6 +117,7 @@ class BehaviorCloneTrainer(object):
         observations = batch["observations"]['proprio'].to(self.device)
         images = batch["observations"]['image'].to(self.device)
         actions = batch["action"].to(self.device)
+        observations, images = self._apply_modality_mask(observations, images)
 
         # Policy forward (use _policy_module for method access when wrapped by DDP)
         with autocast(device_type=observations.device.type, enabled=torch.is_autocast_enabled()):
@@ -129,3 +132,22 @@ class BehaviorCloneTrainer(object):
             "val"
         )
         return metrics
+
+    def _normalize_modality(self, modality):
+        if modality is None:
+            return "both"
+        normalized = str(modality).strip().lower()
+        if normalized in ("both", "all"):
+            return "both"
+        if normalized in ("force", "proprio", "ft"):
+            return "force"
+        if normalized in ("vision", "image"):
+            return "vision"
+        raise ValueError(f"Unsupported input_modality: {modality}. Use 'both', 'force', or 'vision'.")
+
+    def _apply_modality_mask(self, observations, images):
+        if self.input_modality == "force":
+            images = torch.zeros_like(images)
+        elif self.input_modality == "vision":
+            observations = torch.zeros_like(observations)
+        return observations, images

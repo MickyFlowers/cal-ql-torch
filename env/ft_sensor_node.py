@@ -20,7 +20,7 @@ class FtSensorNode:
     def _reset_callback(self, req):
         """Reset the F/T sensor bias."""
         try:
-            self.ft_sensor.reset_bias()
+            self.ft_sensor.reset_zero_force_torque()
             self.filter.reset()
             rospy.loginfo("F/T sensor bias reset successfully")
             return TriggerResponse(success=True, message="F/T sensor bias reset successfully")

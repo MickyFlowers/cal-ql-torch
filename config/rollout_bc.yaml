@@ -28,6 +28,9 @@ image_size: 224
 proprio_norm_type: max_min
 action_norm_type: max_min
 
+# Input modality for BC rollout: both | force | vision
+bc_input_modality: both
+
 # Rollout settings
 num_episodes: 10
 max_steps: 1000

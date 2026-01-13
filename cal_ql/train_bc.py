@@ -134,7 +134,11 @@ def main(cfg: DictConfig):
     )
 
     # Create trainer and setup device/distributed
-    bc = BehaviorCloneTrainer(cfg.learning_rate, policy)
+    bc = BehaviorCloneTrainer(
+        cfg.learning_rate,
+        policy,
+        input_modality=cfg.get("bc_input_modality", "both"),
+    )
     print("Created BC Trainer")
     if is_distributed:
         bc.setup_multi_gpu(local_rank)

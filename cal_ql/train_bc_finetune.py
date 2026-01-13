@@ -100,7 +100,11 @@ def main(cfg: DictConfig):
         train_backbone=cfg.train_policy_backbone,
     )
 
-    bc = BehaviorCloneTrainer(cfg.learning_rate, policy)
+    bc = BehaviorCloneTrainer(
+        cfg.learning_rate,
+        policy,
+        input_modality=cfg.get("bc_input_modality", "both"),
+    )
     if is_distributed:
         bc.setup_multi_gpu(local_rank)
     else:

@@ -16,6 +16,9 @@ num_workers: 16
 sample_ratio: 1.0
 sample_seed: 42
 
+# Input modality for BC training: both | force | vision
+bc_input_modality: both
+
 
 # Architecture & policy hyperparameters
 hidden_dim: 256

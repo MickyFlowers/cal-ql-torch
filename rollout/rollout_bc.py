@@ -56,6 +56,27 @@ def denormalize(data, statistics, norm_type, epsilon=1e-6):
     return data
 
 
+def normalize_modality(modality):
+    if modality is None:
+        return "both"
+    normalized = str(modality).strip().lower()
+    if normalized in ("both", "all"):
+        return "both"
+    if normalized in ("force", "proprio", "ft"):
+        return "force"
+    if normalized in ("vision", "image"):
+        return "vision"
+    raise ValueError(f"Unsupported bc_input_modality: {modality}. Use 'both', 'force', or 'vision'.")
+
+
+def apply_modality_mask(proprio_tensor, image_tensor, input_modality):
+    if input_modality == "force":
+        image_tensor = torch.zeros_like(image_tensor)
+    elif input_modality == "vision":
+        proprio_tensor = torch.zeros_like(proprio_tensor)
+    return proprio_tensor, image_tensor
+
+
 @hydra.main(config_path="../config", config_name="rollout_bc", version_base=None)
 def main(config):
     env = gym.make("ur_env_v0", config=config.env)
@@ -98,6 +119,7 @@ def main(config):
         policy.to(device=config.device)
         policy.load_state_dict(policy_state_dict)
         policy.eval()
+        input_modality = normalize_modality(config.get("bc_input_modality", "both"))
 
         # Load statistics for normalization
         with open(config.statistics_path, 'r') as f:
@@ -137,6 +159,8 @@ def main(config):
                 image_bytes = observation["img_obs"]
                 image = np_buffer_to_pil_image(np.frombuffer(image_bytes, dtype=np.uint8))
                 image = image_transform(image).unsqueeze(0).to(device=config.device)
+
+                proprio_tensor, image = apply_modality_mask(proprio_tensor, image, input_modality)
 
                 # Get velocity action from policy
                 with torch.no_grad():
