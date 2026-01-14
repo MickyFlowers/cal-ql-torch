@@ -1,0 +1,42 @@
+# BC (Behavior Cloning) Policy Rollout Configuration
+
+defaults:
+  - env: env
+
+# Device
+device: cuda:0
+
+# Checkpoint
+ckpt_path: ./checkpoints/bc_policy.pth
+statistics_path: ./dataset/statistics.yaml
+
+# Model architecture (must match training config)
+observation_dim: 6
+action_dim: 6
+hidden_dim: 256
+policy_obs_proj_arch: '256-256-256-256'
+policy_out_proj_arch: '256-256-256-256'
+policy_log_std_multiplier: 1.0
+policy_log_std_offset: -1.0
+orthogonal_init: true
+
+# Image processing
+image_resize: 256
+image_size: 224
+
+# Normalization
+proprio_norm_type: max_min
+action_norm_type: max_min
+
+# Input modality for BC rollout: both | force | vision
+bc_input_modality: both
+
+# Rollout settings
+num_episodes: 10
+max_steps: 1000
+freq: 30  # Control loop frequency in Hz
+
+# Data saving
+save_data: false
+save_path: ./rollout_bc
+episode_idx: 0
