@@ -193,8 +193,8 @@ def main(config):
                         print("Environment reset complete. Continuing rollout...")
                         break
 
-                if step_count >= config.max_steps:
-                    break
+                # if step_count >= config.max_steps:
+                #     break
 
             if teleop_done:
                 if saver is not None:
